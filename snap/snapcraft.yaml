@@ -1,0 +1,76 @@
+name: git-watchdog
+base: core26
+version: '0.1.0'
+title: git-watchdog
+license: MIT
+summary: Read-only Git remotes while selected processes (e.g. AI agents) run
+description: |
+  git-watchdog monitors selected processes, such as Claude Code. While any are
+  running, it makes your Git remotes read-only: fetch URLs are replaced with 
+  HTTPS URLs that carry a read-only token, and pushing is disabled. When they 
+  exit, it restores the original remote configuration.
+
+  Run `git watchdog init` once, then `git watchdog` to see the status.
+icon: snap/local/logo.png
+source-code:
+  - https://github.com/dobicinaitis/git-watchdog
+website:
+  - https://github.com/dobicinaitis/git-watchdog
+issues:
+  - https://github.com/dobicinaitis/git-watchdog/issues
+contact:
+  - https://github.com/dobicinaitis/git-watchdog/discussions
+grade: stable
+confinement: strict
+
+plugs:
+  # ~/.config/git-watchdog/config.yaml
+  dot-config-git-watchdog:
+    interface: personal-files
+    write:
+      - $HOME/.config/git-watchdog
+  # ~/.bashrc: "init" appends a guarded line that loads the completion for
+  # "git watchdog <TAB>"
+  bashrc:
+    interface: personal-files
+    write:
+      - $HOME/.bashrc
+
+apps:
+  git-watchdog:
+    command: bin/git-watchdog
+    completer: completions/git-watchdog # bash completion, installed by snapd
+    environment:
+      GIT_EXEC_PATH: $SNAP/usr/lib/git-core
+    plugs:
+      - home                    # Git repositories under $HOME
+      - system-observe          # see other processes (pgrep/ps)
+      - dot-config-git-watchdog
+      - bashrc
+
+  # Started at desktop login through the autostart file that "git watchdog init"
+  # writes to $SNAP_USER_DATA/.config/autostart (user daemons are still experimental in snapd).
+  daemon:
+    command: bin/git-watchdog daemon
+    autostart: git-watchdog-daemon.desktop
+    environment:
+      GIT_EXEC_PATH: $SNAP/usr/lib/git-core
+    plugs:
+      - home
+      - system-observe
+      - dot-config-git-watchdog
+
+parts:
+  git-watchdog:
+    plugin: nil
+    source: .
+    override-build: |
+      install -D -m 755 git-watchdog.sh "$CRAFT_PART_INSTALL/bin/git-watchdog"
+      install -d "$CRAFT_PART_INSTALL/completions"
+      bash git-watchdog.sh completion > "$CRAFT_PART_INSTALL/completions/git-watchdog"
+
+  runtime:
+    plugin: nil
+    stage-packages:
+      - git
+      - procps

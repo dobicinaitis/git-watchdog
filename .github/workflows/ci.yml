@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck git-watchdog.sh tests/run-tests.sh
+          ./git-watchdog.sh completion | shellcheck -s bash -
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the stock bash 3.2 on macOS
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -s /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+      - name: Tools
+        run: |
+          bash --version | head -n 1
+          ./git-watchdog.sh check
+      - name: Tests
+        run: tests/run-tests.sh

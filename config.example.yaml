@@ -1,0 +1,33 @@
+# git-watchdog configuration
+
+# Base paths to look for Git repositories in.
+source-directories:
+  - $HOME
+
+# Process names that enable read-only mode while running
+# (exact process name match; extended regular expressions are allowed).
+process-name-matchers:
+  - claude
+  - claude-desktop
+
+# Optional tuning.
+# check-interval: 5      # seconds between process checks
+# rescan-interval: 300   # seconds between repository rescans
+# max-depth: 6           # how deep to look for repositories in source-directories
+
+# Hosts whose remotes are switched to read-only mode, keyed by host name
+# (add ":port" for HTTP(S) remotes on a custom port). Add hosts with
+# "git watchdog init <host>". When no host is listed, all remotes of all
+# repositories are processed: pushing is disabled, fetch URLs stay unchanged.
+#
+# remote:
+#   gitlab.com:
+#     read-only-token: glpat-xxxxxxxxxxxxxxxxxxxx
+#     username: oauth2          # optional, user name for the HTTPS URL
+#     exclude:                  # optional, project paths (globs) to leave alone
+#       - group/project
+remote:
+  gitlab.com:
+    read-only-token: glpat-xxxxxxxxxxxxxxxxxxxx
+    exclude:
+      - group/project

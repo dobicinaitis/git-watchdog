@@ -1,0 +1,9 @@
+#IDEs
+.idea/*
+!.idea/icon.png
+
+# Snapcraft
+*.snap
+parts/
+prime/
+stage/
