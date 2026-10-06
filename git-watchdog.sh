@@ -914,10 +914,17 @@ release_lock() {
 }
 
 cmd_daemon() {
-    local procs active last_state="unset" last_scan=0 now sleeper
+    local procs active last_state="unset" last_scan=0 now sleeper pid
     if ! acquire_lock; then
-        printf 'git-watchdog: daemon already running (pid %s)\n' "$(daemon_pid)"
-        return 0
+        pid="$(daemon_pid)"
+        if [ -z "$pid" ] || ! daemon_is_stale; then
+            printf 'git-watchdog: daemon already running (pid %s)\n' "$pid"
+            return 0
+        fi
+        log INFO "daemon (pid $pid) is older than $SELF; replacing it"
+        if ! { stop_daemon "$pid" && acquire_lock; }; then
+            die "cannot replace the outdated daemon (pid $pid)"
+        fi
     fi
     trap 'kill "$sleeper" 2>/dev/null; release_lock; log INFO "daemon stopped (pid $$)"; exit 0' TERM INT HUP
     trap 'release_lock' EXIT
@@ -944,17 +951,49 @@ cmd_daemon() {
             last_scan="$now"
             last_state="$active"
         fi
+        # Updated or removed underneath us: restart with the new version, or quit.
+        if [ ! -f "$SELF" ]; then
+            log INFO "$SELF was removed; daemon stopped (pid $$)"
+            exit 0
+        elif daemon_is_stale; then
+            log INFO "$SELF was updated; restarting the daemon"
+            release_lock
+            trap - EXIT TERM INT HUP
+            exec "$SELF" ${DRY_RUN:+--dry-run} daemon
+        fi
         sleep "$CFG_CHECK_INTERVAL" &
         sleeper=$!
         wait "$sleeper"
     done
 }
 
+# A daemon is stale when the program was installed or changed after it started
+# (git pull, snap refresh, or a snap reinstalled while its old daemon kept
+# running). The lock's pid file is written when the daemon starts.
+daemon_is_stale() {
+    [ "$SELF" -nt "$LOCK_DIR/pid" ]
+}
+
+# stop_daemon PID - terminate the daemon and wait for it to exit.
+stop_daemon() {
+    local i
+    kill "$1" 2>/dev/null || return 1
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        kill -0 "$1" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    return 1
+}
+
 start_daemon() {
     local pid i
     if pid="$(daemon_pid)"; then
-        printf '%s\n' "$pid"
-        return 0
+        if ! daemon_is_stale; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        log INFO "daemon (pid $pid) is older than $SELF; restarting it"
+        stop_daemon "$pid" || { log ERROR "cannot stop the outdated daemon (pid $pid)"; return 1; }
     fi
     nohup "$SELF" ${DRY_RUN:+--dry-run} daemon </dev/null >/dev/null 2>&1 &
     for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -969,7 +1008,7 @@ start_daemon() {
 
 cmd_start() {
     local pid
-    if pid="$(daemon_pid)"; then
+    if pid="$(daemon_pid)" && ! daemon_is_stale; then
         printf 'git-watchdog daemon already running (pid %s)\n' "$pid"
         return 0
     fi
@@ -978,7 +1017,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-    local pid i
+    local pid
     if ! pid="$(daemon_pid)"; then
         printf 'git-watchdog daemon is not running\n'
         return 0
@@ -987,11 +1026,7 @@ cmd_stop() {
         printf '[dry-run] would stop the daemon (pid %s)\n' "$pid"
         return 0
     fi
-    kill "$pid"
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.2
-    done
+    stop_daemon "$pid" || die "could not stop the daemon (pid $pid)"
     printf 'git-watchdog daemon stopped (pid %s)\n' "$pid"
 }
 
@@ -1136,43 +1171,102 @@ install_file() { # install_file <content> <path> <mode>
     printf '%s\n' "$content" >"$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$path"
 }
 
-cmd_init() {
-    local host="$1" token="" existing on_path completion_file="$COMPLETION_DIR/git-watchdog"
+# ---------------------------------------------------------------- terminal output
 
-    # main() already stopped if a required tool is missing.
-    printf 'Tools:       all required tools are installed\n'
-
-    # 1. Config file (owner-only; it holds tokens).
-    if [ -f "$CONFIG_FILE" ]; then
-        printf 'Config:      %s (exists)\n' "$CONFIG_FILE"
-    else
-        if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would create %s\n' "$CONFIG_FILE"
-        else
-            printf 'Config:      %s (created)\n' "$CONFIG_FILE"
-            (umask 077 && mkdir -p "$CONFIG_DIR") || die "cannot create $CONFIG_DIR"
-            install_file "$(default_config)" "$CONFIG_FILE" 600 || die "cannot write $CONFIG_FILE"
-        fi
+# Symbols and colors for human-facing output. Colors only on a terminal and
+# unless NO_COLOR is set; ASCII symbols when the locale is not UTF-8.
+ui_setup() {
+    case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+        *UTF-8* | *utf-8* | *UTF8* | *utf8*) SYM_OK='✓' SYM_WARN='!' SYM_ERR='✗' SYM_DRY='○' ;;
+        *) SYM_OK='+' SYM_WARN='!' SYM_ERR='x' SYM_DRY='-' ;;
+    esac
+    C_OK="" C_WARN="" C_ERR="" C_DIM="" C_BOLD="" C_CMD="" C_RESET=""
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        C_OK=$'\033[32m' C_WARN=$'\033[33m' C_ERR=$'\033[31m' C_DIM=$'\033[2m'
+        C_BOLD=$'\033[1m' C_CMD=$'\033[36m' C_RESET=$'\033[0m'
     fi
-    [ -z "$DRY_RUN" ] && chmod 700 "$CONFIG_DIR" 2>/dev/null && chmod 600 "$CONFIG_FILE" 2>/dev/null
+    NEXT_STEPS=""
+}
 
-    # 2. Remote host with its read-only token.
+# report ok|warn|error|dry LABEL TEXT [DETAIL] - one aligned result line.
+report() {
+    local sym color
+    case "$1" in
+        ok) sym="$SYM_OK" color="$C_OK" ;;
+        warn) sym="$SYM_WARN" color="$C_WARN" ;;
+        error) sym="$SYM_ERR" color="$C_ERR" ;;
+        *) sym="$SYM_DRY" color="$C_DIM" ;;
+    esac
+    printf '  %s%s%s %-12s %s' "$color" "$sym" "$C_RESET" "$2" "$3"
+    [ -n "${4:-}" ] && printf ' %s%s%s' "$C_DIM" "$4" "$C_RESET"
+    printf '\n'
+}
+
+# add_step TEXT [COMMAND] - remember a follow-up step for the user.
+add_step() {
+    NEXT_STEPS="$NEXT_STEPS$1$TAB${2:-}$NL"
+}
+
+print_steps() {
+    local text cmd n=0
+    [ -n "$NEXT_STEPS" ] || return 0
+    printf '\n%sNext steps%s\n' "$C_BOLD" "$C_RESET"
+    while IFS="$TAB" read -r text cmd; do
+        [ -n "$text" ] || continue
+        n=$((n + 1))
+        printf '  %s%d.%s %s\n' "$C_BOLD" "$n" "$C_RESET" "$text"
+        [ -n "$cmd" ] && printf '     %s%s%s\n' "$C_CMD" "$cmd" "$C_RESET"
+    done <<EOF
+$NEXT_STEPS
+EOF
+}
+
+cmd_init() {
+    local host="$1" token="" existing completion_file="$COMPLETION_DIR/git-watchdog" autostart link_cmd
+
+    # Ask for the token first, so the summary below is not interrupted.
     if [ -n "$host" ]; then
-        case "$host" in *[[:space:]/]* | *:*:* | '') die "invalid host '$host' (expected e.g. gitlab.com or git.example.com:8443)" ;; esac
+        case "$host" in *[[:space:]/]* | *:*:*) die "invalid host '$host' (expected e.g. gitlab.com or git.example.com:8443)" ;; esac
         if [ -n "${GIT_WATCHDOG_TOKEN+x}" ]; then
             token="$GIT_WATCHDOG_TOKEN"
         elif [ -t 0 ]; then
-            printf 'Read-only token for %s (input hidden, empty = only disable pushing): ' "$host" >&2
+            printf 'Read-only token for %s (hidden; leave empty to only block pushes): ' "$host" >&2
             IFS= read -rs token
-            printf '\n' >&2
+            printf '\n\n' >&2
         else
             IFS= read -r token
         fi
+    fi
+
+    ui_setup
+    printf '%sgit-watchdog init%s%s\n\n' "$C_BOLD" "$C_RESET" "${DRY_RUN:+ ${C_DIM}(dry run, nothing is changed)${C_RESET}}"
+
+    # main() already stopped if a required tool is missing.
+    report ok "Tools" "all required tools are installed"
+
+    # 1. Config file (owner-only; it holds tokens).
+    if [ -f "$CONFIG_FILE" ]; then
+        [ -z "$DRY_RUN" ] && chmod 700 "$CONFIG_DIR" 2>/dev/null && chmod 600 "$CONFIG_FILE" 2>/dev/null
+        report ok "Config" "$(tilde "$CONFIG_FILE")" "(exists)"
+    elif [ -n "$DRY_RUN" ]; then
+        report dry "Config" "would create $(tilde "$CONFIG_FILE")"
+    else
+        (umask 077 && mkdir -p "$CONFIG_DIR") || die "cannot create $CONFIG_DIR"
+        install_file "$(default_config)" "$CONFIG_FILE" 600 || die "cannot write $CONFIG_FILE"
+        report ok "Config" "$(tilde "$CONFIG_FILE")" "(created)"
+    fi
+
+    # 2. Remote host with its read-only token.
+    if [ -n "$host" ]; then
         if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would set the read-only token of %s in %s\n' "$host" "$CONFIG_FILE"
+            report dry "Remote" "would save the read-only token of $host"
         else
             GWD_TOKEN="$token" config_set_token "$host" || die "failed to update $CONFIG_FILE"
-            printf 'Remote:      %s %s\n' "$host" "$([ -n "$token" ] && echo '(read-only token saved)' || echo '(no token; pushing will be disabled only)')"
+            if [ -n "$token" ]; then
+                report ok "Remote" "$host" "(read-only token saved)"
+            else
+                report warn "Remote" "$host" "(no token: pushing is blocked, fetch URLs stay unchanged)"
+            fi
         fi
     fi
 
@@ -1182,53 +1276,64 @@ cmd_init() {
     #    (removed with the snap) and asks the user to link it.
     if [ -n "${SNAP:-}" ]; then
         completion_file="${SNAP_USER_COMMON:-$REAL_HOME/snap/git-watchdog/common}/git-watchdog.bash"
+        link_cmd="mkdir -p $(tilde "$COMPLETION_DIR") && ln -sf $(tilde "$completion_file") $(tilde "$COMPLETION_DIR")/git-watchdog"
         if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would write bash completion to %s\n' "$completion_file"
+            report dry "Completion" "would write $(tilde "$completion_file")"
         elif mkdir -p "$(dirname "$completion_file")" && install_file "$(completion_script)" "$completion_file" 644; then
-            printf 'Completion:  "git-watchdog <TAB>" is provided by the snap. For "git watchdog <TAB>" run:\n'
-            printf '  mkdir -p %s && ln -sf %s %s/git-watchdog\n' \
-                "$(tilde "$COMPLETION_DIR")" "$(tilde "$completion_file")" "$(tilde "$COMPLETION_DIR")"
+            report ok "Completion" "git-watchdog <TAB>" "(provided by the snap)"
+            if [ "$(readlink "$COMPLETION_DIR/git-watchdog" 2>/dev/null)" = "$completion_file" ]; then
+                report ok "Completion" "git watchdog <TAB>" "(linked)"
+            else
+                report warn "Completion" "git watchdog <TAB>" "(needs one command, see next steps)"
+                add_step 'Enable "git watchdog <TAB>" completion (the snap may not do it):' "$link_cmd"
+            fi
         else
-            printf 'Warning: could not write bash completion to %s\n' "$completion_file" >&2
+            report error "Completion" "could not write $(tilde "$completion_file")"
         fi
     elif [ -n "$DRY_RUN" ]; then
-        printf '[dry-run] would install bash completion to %s/git-watchdog\n' "$COMPLETION_DIR"
+        report dry "Completion" "would install $(tilde "$COMPLETION_DIR")/git-watchdog"
     elif mkdir -p "$COMPLETION_DIR" && install_file "$(completion_script)" "$COMPLETION_DIR/git-watchdog" 644; then
-        printf 'Completion:  %s/git-watchdog\n' "$COMPLETION_DIR"
+        report ok "Completion" "$(tilde "$COMPLETION_DIR")/git-watchdog"
     else
-        printf 'Warning: could not install bash completion to %s\n' "$COMPLETION_DIR" >&2
+        report error "Completion" "could not install $(tilde "$COMPLETION_DIR")/git-watchdog"
     fi
 
     # 4. Git extension ("git watchdog" needs git-watchdog on PATH).
     existing="$(command -v git-watchdog 2>/dev/null)"
-    [ -z "$existing" ] && [ -n "${SNAP:-}" ] && existing="/snap/bin/git-watchdog"
+    [ -n "${SNAP:-}" ] && existing="/snap/bin/git-watchdog"
     if [ -n "$existing" ]; then
-        printf 'Git command: git watchdog -> %s\n' "$existing"
+        report ok "Git command" "git watchdog" "($(tilde "$existing"))"
     elif [ -n "$DRY_RUN" ]; then
-        printf '[dry-run] would link %s/git-watchdog -> %s\n' "$BIN_DIR" "$SELF"
+        report dry "Git command" "would link $(tilde "$BIN_DIR")/git-watchdog to $(tilde "$SELF")"
     elif mkdir -p "$BIN_DIR" && ln -sf "$SELF" "$BIN_DIR/git-watchdog"; then
-        printf 'Git command: %s/git-watchdog -> %s\n' "$BIN_DIR" "$SELF"
-        on_path=""
-        case ":$PATH:" in *":$BIN_DIR:"*) on_path=1 ;; esac
-        [ -n "$on_path" ] || printf 'Note: add %s to PATH so that "git watchdog" works.\n' "$BIN_DIR"
+        case ":$PATH:" in
+            *":$BIN_DIR:"*) report ok "Git command" "git watchdog" "($(tilde "$BIN_DIR")/git-watchdog)" ;;
+            *)
+                report warn "Git command" "git watchdog" "($(tilde "$BIN_DIR") is not on PATH)"
+                add_step "Add $(tilde "$BIN_DIR") to PATH so that \"git watchdog\" works, e.g. in ~/.bashrc:" \
+                    "export PATH=\"\$HOME/${BIN_DIR#"$REAL_HOME"/}:\$PATH\""
+                ;;
+        esac
     else
-        printf 'Warning: could not link %s/git-watchdog\n' "$BIN_DIR" >&2
+        report error "Git command" "could not link $(tilde "$BIN_DIR")/git-watchdog"
     fi
 
     # 5. Snap: start the daemon at desktop login.
     if [ -n "${SNAP:-}" ]; then
-        local autostart
         autostart="$(snap_autostart_file)"
         if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would write %s\n' "$autostart"
+            report dry "Autostart" "would write $(tilde "$autostart")"
         elif mkdir -p "$(dirname "$autostart")" && install_file "$(snap_autostart_entry)" "$autostart" 644; then
-            printf 'Autostart:   the daemon starts at login (%s)\n' "$autostart"
+            report ok "Autostart" "the daemon starts when you log in"
         else
-            printf 'Warning: could not write %s; the daemon starts on "git watchdog" only\n' "$autostart" >&2
+            report error "Autostart" "could not write $(tilde "$autostart")" "(the daemon starts with \"git watchdog\" only)"
         fi
     fi
 
-    printf '\nNext: review %s, then run "git watchdog" to start the daemon.\n' "$CONFIG_FILE"
+    add_step "Review the config (source directories, process names, hosts):" "$(tilde "$CONFIG_FILE")"
+    [ -z "$host" ] && add_step "Add a host and its read-only token:" "git watchdog init gitlab.com"
+    add_step "Start the daemon and see its status:" "git watchdog"
+    print_steps
 }
 
 # The snap starts its daemon at desktop login from this file (see snapcraft.yaml).

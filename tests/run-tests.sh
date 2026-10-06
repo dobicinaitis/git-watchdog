@@ -123,7 +123,7 @@ run_suite() {
     check "snap init keeps its config in its data dir" test -f "$HOME/snap/git-watchdog/common/config.yaml"
     eq "snap init leaves .bashrc alone" "$bashrc_before" "$(cat "$HOME/.bashrc")"
     local link_cmd
-    link_cmd="$(grep '^  mkdir -p .* && ln -sf ' <<<"$snap_init_out")"
+    link_cmd="$(grep '^ *mkdir -p .* && ln -sf ' <<<"$snap_init_out")"
     check "snap init prints the completion link command" test -n "$link_cmd"
     rm -rf "$HOME/.local/share/bash-completion"
     eval "$link_cmd"
@@ -231,6 +231,26 @@ EOF
     eq "status reuses the running daemon" "$pid1" "$pid2"
     gwd stop >/dev/null
     check "stop terminates the daemon" sh -c "! kill -0 $pid1 2>/dev/null"
+
+    # --- an outdated daemon is replaced (git pull, snap refresh or reinstall)
+    local copy="$T/bin/git-watchdog-copy.sh" pid_b pidfile
+    cp "$SCRIPT" "$copy"
+    "$copy" start >/dev/null
+    sleep 1.1
+    touch "$copy" # "update" the program
+    sleep 3
+    check "daemon restarts itself after the program changed" grep -q 'was updated; restarting the daemon' "$LOG"
+    check "restarted daemon is running" sh -c "kill -0 \$(cat '$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock/pid')"
+    "$copy" stop >/dev/null
+    # A daemon that is older than the program (e.g. left over from a removed
+    # snap) is replaced by "status" (or by the daemon itself, whichever is first).
+    "$copy" start >/dev/null
+    pidfile="$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock/pid"
+    touch -t 200001010000 "$pidfile"
+    pid_b="$("$copy" status | sed -n 's/.*running (pid \([0-9]*\)).*/\1/p')"
+    check "status reports a running daemon after replacing an outdated one" test -n "$pid_b"
+    check "the running daemon is not older than the program" sh -c "! test '$copy' -nt '$pidfile'"
+    "$copy" stop >/dev/null
 
     # --- log hygiene
     eq "log is owner-only" "600" "$(stat -c %a "$LOG" 2>/dev/null || stat -f %Lp "$LOG")"

@@ -45,6 +45,10 @@ When no matching process remains, the original `url` and `pushurl` values are re
 
 - Hidden directories and `node_modules` are skipped when searching for repositories.
 
+- A daemon never keeps running an outdated version. When the program is updated (`git pull`, snap refresh or
+  reinstall), the daemon restarts itself, and `git watchdog` replaces a daemon that started before the current program
+  was installed.
+
 ## Install from source
 
 Requirements: `bash` (3.2+), `git`, `pgrep`/`ps`, and standard POSIX tools such as `awk` and `od`.
@@ -55,6 +59,26 @@ git clone git@github.com:dobicinaitis/git-watchdog.git
 git watchdog init gitlab.com        # asks for the read-only token
 git watchdog                        # starts the daemon, shows status
 ```
+
+Example output:
+
+```text
+git-watchdog init
+
+  ✓ Tools        all required tools are installed
+  ✓ Config       ~/.config/git-watchdog/config.yaml (created)
+  ✓ Remote       gitlab.com (read-only token saved)
+  ✓ Completion   ~/.local/share/bash-completion/completions/git-watchdog
+  ✓ Git command  git watchdog (~/.local/bin/git-watchdog)
+
+Next steps
+  1. Review the config (source directories, process names, hosts):
+     ~/.config/git-watchdog/config.yaml
+  2. Start the daemon and see its status:
+     git watchdog
+```
+
+Symbols are colored on a terminal (set `NO_COLOR` to turn that off) and fall back to ASCII outside UTF-8 locales.
 
 `init` performs the following actions and is safe to run repeatedly:
 
