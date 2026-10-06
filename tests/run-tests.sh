@@ -30,7 +30,14 @@ setup() {
     export GIT_CONFIG_NOSYSTEM=1
     unset XDG_CONFIG_HOME GIT_WATCHDOG_CONFIG GIT_WATCHDOG_TOKEN SNAP SNAP_REAL_HOME
     mkdir -p "$HOME/src" "$GIT_WATCHDOG_RUN_DIR" "$T/bin"
-    export PATH="$T/bin:$PATH"
+    # Hide any installed git-watchdog (e.g. the snap) so init behaves as on a clean machine.
+    local dir clean_path=""
+    local IFS=:
+    for dir in $PATH; do
+        [ -e "$dir/git-watchdog" ] || clean_path="$clean_path${clean_path:+:}$dir"
+    done
+    unset IFS
+    export PATH="$T/bin:$clean_path"
     # The fake agent is a copy of sleep, so its process name is FAKE_PROC.
     # Multi-call binaries (e.g. uutils coreutils) refuse to run under another
     # name; a script works there instead, since Linux names it after the file.
@@ -101,12 +108,14 @@ run_suite() {
     check ".bashrc still works without the completion file" bash -c "set -e; . '$HOME/.bashrc'"
     mv "$T/completion.bak" "$completion"
     # Inside the snap the completion lives in the snap's data dir.
-    SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON="$HOME/snap/git-watchdog/common" SNAP_USER_DATA="$HOME/snap/git-watchdog/x1" gwd init >/dev/null
+    local snap_init_out
+    snap_init_out="$(SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON="$HOME/snap/git-watchdog/common" SNAP_USER_DATA="$HOME/snap/git-watchdog/x1" gwd init)"
     check "snap init writes the autostart entry" grep -q '^Exec=git-watchdog.daemon$' "$HOME/snap/git-watchdog/x1/.config/autostart/git-watchdog-daemon.desktop"
     check "snap init writes completion to its data dir" test -f "$HOME/snap/git-watchdog/common/git-watchdog.bash"
-    eq "snap init adds its own guarded .bashrc line" "1" "$(grep -cF "$bashrc_snap" "$HOME/.bashrc")"
+    check "snap init keeps its config in its data dir" test -f "$HOME/snap/git-watchdog/common/config.yaml"
+    check "snap init leaves .bashrc alone" sh -c "! grep -qF '$bashrc_snap' '$HOME/.bashrc'"
+    check "snap init prints the .bashrc line" grep -qF "$bashrc_snap" <<<"$snap_init_out"
     rm -rf "$HOME/snap"
-    check ".bashrc still works after the snap is removed" bash -c "set -e; . '$HOME/.bashrc'"
     GIT_WATCHDOG_TOKEN="new-token" gwd init git.example.com:8443 >/dev/null
     eq "init updates an existing host token once" "1" "$(grep -c 'new-token' "$CFG")"
 

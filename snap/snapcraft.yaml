@@ -23,19 +23,6 @@ contact:
 grade: stable
 confinement: strict
 
-plugs:
-  # ~/.config/git-watchdog/config.yaml
-  dot-config-git-watchdog:
-    interface: personal-files
-    write:
-      - $HOME/.config/git-watchdog
-  # ~/.bashrc: "init" appends a guarded line that loads the completion for
-  # "git watchdog <TAB>"
-  bashrc:
-    interface: personal-files
-    write:
-      - $HOME/.bashrc
-
 apps:
   git-watchdog:
     command: bin/git-watchdog
@@ -45,8 +32,6 @@ apps:
     plugs:
       - home                    # Git repositories under $HOME
       - system-observe          # see other processes (pgrep/ps)
-      - dot-config-git-watchdog
-      - bashrc
 
   # Started at desktop login through the autostart file that "git watchdog init"
   # writes to $SNAP_USER_DATA/.config/autostart (user daemons are still experimental in snapd).
@@ -58,7 +43,6 @@ apps:
     plugs:
       - home
       - system-observe
-      - dot-config-git-watchdog
 
 parts:
   git-watchdog:

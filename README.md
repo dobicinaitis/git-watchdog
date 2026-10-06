@@ -181,7 +181,7 @@ Anchors, multiline strings, and inline maps are not supported.
 
 | Path                                      | Purpose                                                           |
 |-------------------------------------------|-------------------------------------------------------------------|
-| `~/.config/git-watchdog/config.yaml`      | Configuration (mode `600`; contains tokens)                       |
+| `~/.config/git-watchdog/config.yaml`      | Configuration (mode `600`; contains tokens); snap: see below      |
 | `/tmp/git-watchdog-<uid>.log`             | Log (mode `600`; rotated at 1 MiB; tokens are redacted)           |
 | `/tmp/git-watchdog-<uid>.lock/`           | Daemon lock and PID                                               |
 | `.git/config` `[git-watchdog "<remote>"]` | Masked original URLs and their key while read-only mode is active |
@@ -209,7 +209,8 @@ tokens.
 
 With `--dry-run`, the command only reports what it would do.
 
-For the snap, run:
+For the snap, run the commands below, then remove the line ending in
+`# git-watchdog completion` from `~/.bashrc` if you added it:
 
 ```bash
 git watchdog uninstall
@@ -232,25 +233,29 @@ copies the completion script to:
 
 `~/snap/git-watchdog/common/git-watchdog.bash`
 
-and adds the corresponding guarded line to `~/.bashrc`.
+and prints a guarded line for you to add to `~/.bashrc` (the snap is not allowed to edit it):
 
-The directory is deleted when the snap is removed, and the guard makes the `.bashrc` entry a no-op afterward.
+```bash
+if [ -f "$HOME/snap/git-watchdog/common/git-watchdog.bash" ]; then . "$HOME/snap/git-watchdog/common/git-watchdog.bash"; fi  # git-watchdog completion
+```
+
+The directory is deleted when the snap is removed, and the guard makes the line a no-op afterward.
+
+The snap keeps its configuration in `~/snap/git-watchdog/common/config.yaml` instead of
+`~/.config/git-watchdog/config.yaml`, because a confined snap cannot access `~/.config` without the super-privileged
+`personal-files` interface. The folder survives snap updates and is removed together with the snap.
 
 ```bash
 snapcraft pack
 sudo snap install --dangerous git-watchdog_0.1.0_amd64.snap
 sudo snap connect git-watchdog:system-observe
-sudo snap connect git-watchdog:dot-config-git-watchdog
-sudo snap connect git-watchdog:bashrc
-git watchdog init gitlab.com
+git watchdog init github.com
 ```
 
 Notes:
 
-- `personal-files` and `system-observe` are not connected automatically for locally built snaps, so the `snap connect`
-  commands are required.
-
-- Without the `bashrc` connection, `init` prints the line that you need to add manually.
+- `system-observe` (needed to see other processes) is not connected automatically for locally built snaps, so the
+  `snap connect` command is required.
 
 - Snaps have a private `/tmp`, so the snap's log is located at:
 

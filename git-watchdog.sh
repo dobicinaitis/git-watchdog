@@ -22,7 +22,11 @@ set -o pipefail
 # --------------------------------------------------------------------------- paths
 
 REAL_HOME="${SNAP_REAL_HOME:-$HOME}"
-if [ -n "${SNAP:-}" ] || [ -z "${XDG_CONFIG_HOME:-}" ]; then
+if [ -n "${SNAP:-}" ]; then
+    # A strictly confined snap cannot reach ~/.config without the
+    # super-privileged personal-files interface; use its own data dir instead.
+    CONFIG_DIR="${SNAP_USER_COMMON:-$REAL_HOME/snap/git-watchdog/common}"
+elif [ -z "${XDG_CONFIG_HOME:-}" ]; then
     CONFIG_DIR="$REAL_HOME/.config/git-watchdog"
 else
     CONFIG_DIR="$XDG_CONFIG_HOME/git-watchdog"
@@ -1232,7 +1236,10 @@ bashrc_source_completion() {
             ;;
     esac
     line="if [ -f \"$path_expr\" ]; then . \"$path_expr\"; fi  # git-watchdog completion"
-    if [ ! -f "$bashrc" ]; then
+    if [ -n "${SNAP:-}" ]; then
+        # The snap may not touch ~/.bashrc; leave it to the user.
+        printf 'Bashrc:      for "git watchdog <TAB>" add this line to ~/.bashrc:\n  %s\n' "$line"
+    elif [ ! -f "$bashrc" ]; then
         printf 'Bashrc:      %s not found; for "git watchdog <TAB>" source %s in your shell rc\n' "$bashrc" "$shown"
     elif ! [ -r "$bashrc" ]; then
         printf 'Warning: cannot read %s; for "git watchdog <TAB>" add:\n  %s\n' "$bashrc" "$line" >&2
@@ -1317,8 +1324,10 @@ cmd_uninstall() {
     fi
 
     # 4. The completion line in ~/.bashrc (rewritten in place to keep its
-    #    permissions and any symlink).
-    if [ -f "$bashrc" ] && grep -q '# git-watchdog completion$' "$bashrc" 2>/dev/null; then
+    #    permissions and any symlink). The snap cannot read ~/.bashrc.
+    if [ -n "${SNAP:-}" ]; then
+        printf 'If you added it, remove the line ending in "# git-watchdog completion" from ~/.bashrc\n'
+    elif [ -f "$bashrc" ] && grep -q '# git-watchdog completion$' "$bashrc" 2>/dev/null; then
         if [ -n "$DRY_RUN" ]; then
             printf '[dry-run] would remove the git-watchdog completion line from %s\n' "$bashrc"
         elif tmp="$(mktemp)" && grep -v '# git-watchdog completion$' "$bashrc" >"$tmp" && cat "$tmp" >"$bashrc"; then
