@@ -73,6 +73,17 @@ snapshot() { # all config lines of every test repo
 }
 
 gwd() { "$SCRIPT" "$@"; }
+
+# Ask bash-completion + Git's completion what "git watchdog <word><TAB>" offers.
+complete_git_watchdog() {
+    bash --norc -c '
+        source /usr/share/bash-completion/bash_completion
+        _comp_load git 2>/dev/null || _completion_loader git
+        COMP_WORDS=(git watchdog "$1"); COMP_CWORD=2
+        COMP_LINE="git watchdog $1"; COMP_POINT=${#COMP_LINE}
+        __git_wrap__git_main 2>/dev/null || _git
+        echo ${COMPREPLY[*]}' _ "$1"
+}
 url() { git -C "$1" config --get-all "remote.$2.url"; }
 pushurl() { git -C "$1" config --get-all "remote.$2.pushurl"; }
 
@@ -90,6 +101,8 @@ run_suite() {
     # --- tool check and init
     check "check reports all tools present" eval "gwd check >/dev/null"
     printf '# user bashrc\n' >"$HOME/.bashrc"
+    local bashrc_before
+    bashrc_before="$(cat "$HOME/.bashrc")"
     out="$(printf '%s\n' "$TOKEN" | gwd init gitlab.com)"
     check "init creates config" test -f "$CFG"
     eq "config is owner-only" "600" "$(stat -c %a "$CFG" 2>/dev/null || stat -f %Lp "$CFG")"
@@ -97,24 +110,26 @@ run_suite() {
     check "init links git extension" test -L "$HOME/.local/bin/git-watchdog"
     check "init output does not echo the token" sh -c "! printf '%s' \"\$1\" | grep -q '$TOKEN'" _ "$out"
     local completion="$HOME/.local/share/bash-completion/completions/git-watchdog"
-    # The .bashrc line refers to the literal $HOME.
-    # shellcheck disable=SC2016
-    local bashrc_completion='$HOME/.local/share/bash-completion/completions/git-watchdog' bashrc_snap='$HOME/snap/git-watchdog/common/git-watchdog.bash'
-    eq "init adds the completion to .bashrc" "1" "$(grep -cF "$bashrc_completion" "$HOME/.bashrc")"
     GIT_WATCHDOG_TOKEN="" gwd init git.example.com:8443 >/dev/null
-    eq "init does not add the .bashrc line twice" "1" "$(grep -cF "$bashrc_completion" "$HOME/.bashrc")"
-    check ".bashrc loads the completion" bash -c ". '$HOME/.bashrc' && declare -F _git_watchdog >/dev/null"
-    mv "$completion" "$T/completion.bak"
-    check ".bashrc still works without the completion file" bash -c "set -e; . '$HOME/.bashrc'"
-    mv "$T/completion.bak" "$completion"
+    eq "init leaves .bashrc alone" "$bashrc_before" "$(cat "$HOME/.bashrc")"
+    if [ -f /usr/share/bash-completion/bash_completion ] && [ -f /usr/share/bash-completion/completions/git ]; then
+        eq "git watchdog <TAB> completes via bash-completion" "status start stop" "$(complete_git_watchdog st)"
+    fi
     # Inside the snap the completion lives in the snap's data dir.
     local snap_init_out
     snap_init_out="$(SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON="$HOME/snap/git-watchdog/common" SNAP_USER_DATA="$HOME/snap/git-watchdog/x1" gwd init)"
     check "snap init writes the autostart entry" grep -q '^Exec=git-watchdog.daemon$' "$HOME/snap/git-watchdog/x1/.config/autostart/git-watchdog-daemon.desktop"
     check "snap init writes completion to its data dir" test -f "$HOME/snap/git-watchdog/common/git-watchdog.bash"
     check "snap init keeps its config in its data dir" test -f "$HOME/snap/git-watchdog/common/config.yaml"
-    check "snap init leaves .bashrc alone" sh -c "! grep -qF '$bashrc_snap' '$HOME/.bashrc'"
-    check "snap init prints the .bashrc line" grep -qF "$bashrc_snap" <<<"$snap_init_out"
+    eq "snap init leaves .bashrc alone" "$bashrc_before" "$(cat "$HOME/.bashrc")"
+    local link_cmd
+    link_cmd="$(grep '^  mkdir -p .* && ln -sf ' <<<"$snap_init_out")"
+    check "snap init prints the completion link command" test -n "$link_cmd"
+    rm -rf "$HOME/.local/share/bash-completion"
+    eval "$link_cmd"
+    check "the printed command creates the completion dir and link" test -L "$completion"
+    check "the link points at the snap's completion" grep -q '_git_watchdog' "$completion"
+    gwd init >/dev/null # back to the regular completion file
     rm -rf "$HOME/snap"
     GIT_WATCHDOG_TOKEN="new-token" gwd init git.example.com:8443 >/dev/null
     eq "init updates an existing host token once" "1" "$(grep -c 'new-token' "$CFG")"
@@ -223,7 +238,6 @@ EOF
     check "log contains activity" grep -q 'read-only mode ACTIVE' "$LOG"
 
     # --- uninstall (keeps the config by default)
-    printf 'alias ll="ls -l"\n' >>"$HOME/.bashrc"
     gwd start >/dev/null
     start_fake
     sleep 3
@@ -236,8 +250,6 @@ EOF
     eq "uninstall restores the remotes" "$before" "$(snapshot)"
     check "uninstall removes the git command link" sh -c "! test -e '$HOME/.local/bin/git-watchdog'"
     check "uninstall removes the completion" sh -c "! test -e '$completion'"
-    check "uninstall removes the .bashrc line" sh -c "! grep -q 'git-watchdog' '$HOME/.bashrc'"
-    check "uninstall keeps other .bashrc lines" grep -q 'alias ll=' "$HOME/.bashrc"
     check "uninstall removes the log" sh -c "! test -e '$LOG'"
     check "uninstall keeps the config" test -f "$CFG"
     gwd uninstall --remove-config >/dev/null

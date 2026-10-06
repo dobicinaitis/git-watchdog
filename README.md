@@ -65,19 +65,8 @@ git watchdog                        # starts the daemon, shows status
 
 3. Installs Bash completion at: `~/.local/share/bash-completion/completions/git-watchdog`.
 
-   The snap uses snapd's built-in completer instead.
-
 4. Creates `~/.local/bin/git-watchdog` as a link to the script, unless `git-watchdog` is already available on `PATH`.
    This allows `git watchdog` to work as a Git subcommand.
-
-5. If `~/.bashrc` exists and does not already reference the completion file, appends:
-
-    ```
-    if [ -f "$HOME/.local/share/bash-completion/completions/git-watchdog" ]; then . "$HOME/.local/share/bash-completion/completions/git-watchdog"; fi  # git-watchdog completion
-    ```
-
-   `bash-completion` loads the file automatically for `git-watchdog …`, but `git watchdog <TAB>` requires it to be
-   loaded up front. The `if` guard ensures that new shells continue to work if the completion file is later removed.
 
 ### Tokens
 
@@ -198,8 +187,6 @@ This stops the daemon, restores every remote, and removes:
 
 - the Bash completion;
 
-- its `~/.bashrc` entry;
-
 - the log; and
 
 - the daemon lock.
@@ -209,12 +196,17 @@ tokens.
 
 With `--dry-run`, the command only reports what it would do.
 
-For the snap, run the commands below, then remove the line ending in
-`# git-watchdog completion` from `~/.bashrc` if you added it:
+For the snap, run:
 
 ```bash
 git watchdog uninstall
 sudo snap remove git-watchdog
+```
+
+If you created the completion link described in the snap section, remove it as well:
+
+```bash
+rm ~/.local/share/bash-completion/completions/git-watchdog
 ```
 
 ## Start at login
@@ -233,13 +225,14 @@ copies the completion script to:
 
 `~/snap/git-watchdog/common/git-watchdog.bash`
 
-and prints a guarded line for you to add to `~/.bashrc` (the snap is not allowed to edit it):
+and prints a command to link it into the `bash-completion` directory, which the snap is not allowed to write to:
 
 ```bash
-if [ -f "$HOME/snap/git-watchdog/common/git-watchdog.bash" ]; then . "$HOME/snap/git-watchdog/common/git-watchdog.bash"; fi  # git-watchdog completion
+mkdir -p ~/.local/share/bash-completion/completions && ln -sf ~/snap/git-watchdog/common/git-watchdog.bash ~/.local/share/bash-completion/completions/git-watchdog
 ```
 
-The directory is deleted when the snap is removed, and the guard makes the line a no-op afterward.
+`bash-completion` loads it only when you press TAB, so it does not slow down shell startup. The target is deleted when
+the snap is removed; the dangling link is then ignored.
 
 The snap keeps its configuration in `~/snap/git-watchdog/common/config.yaml` instead of
 `~/.config/git-watchdog/config.yaml`, because a confined snap cannot access `~/.config` without the super-privileged

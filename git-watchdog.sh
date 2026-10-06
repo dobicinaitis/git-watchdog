@@ -1071,8 +1071,8 @@ cmd_revert() {
 completion_script() {
     cat <<'EOF'
 # bash completion for git-watchdog                              -*- shell-script -*-
-# Installed by "git watchdog init", which also sources it from ~/.bashrc so that
-# "git watchdog ..." completes as well as "git-watchdog ...".
+# Installed by "git watchdog init". bash-completion loads it on demand, both for
+# "git-watchdog ..." and, through Git's completion, for "git watchdog ...".
 
 __git_watchdog_words() {
     local prev="$1"
@@ -1122,6 +1122,14 @@ cmd_hosts() {
     } | sort -u
 }
 
+# Show a path under the home directory as ~/...
+tilde() {
+    case "$1" in
+        "$REAL_HOME"/*) printf '%s/%s' "~" "${1#"$REAL_HOME"/}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 install_file() { # install_file <content> <path> <mode>
     local content="$1" path="$2" mode="$3" tmp
     tmp="$(mktemp "$(dirname "$path")/.gwd.XXXXXX")" || return 1
@@ -1169,14 +1177,17 @@ cmd_init() {
     fi
 
     # 3. Bash completion. The snap ships "git-watchdog <TAB>" through snapd's
-    #    completer; it keeps a copy in its own data dir for "git watchdog <TAB>",
-    #    which is removed together with the snap.
+    #    completer. "git watchdog <TAB>" needs the file in the bash-completion
+    #    dir, which the snap may not write: it keeps a copy in its own data dir
+    #    (removed with the snap) and asks the user to link it.
     if [ -n "${SNAP:-}" ]; then
         completion_file="${SNAP_USER_COMMON:-$REAL_HOME/snap/git-watchdog/common}/git-watchdog.bash"
         if [ -n "$DRY_RUN" ]; then
             printf '[dry-run] would write bash completion to %s\n' "$completion_file"
         elif mkdir -p "$(dirname "$completion_file")" && install_file "$(completion_script)" "$completion_file" 644; then
-            printf 'Completion:  provided by the snap, %s\n' "$completion_file"
+            printf 'Completion:  "git-watchdog <TAB>" is provided by the snap. For "git watchdog <TAB>" run:\n'
+            printf '  mkdir -p %s && ln -sf %s %s/git-watchdog\n' \
+                "$(tilde "$COMPLETION_DIR")" "$(tilde "$completion_file")" "$(tilde "$COMPLETION_DIR")"
         else
             printf 'Warning: could not write bash completion to %s\n' "$completion_file" >&2
         fi
@@ -1204,10 +1215,7 @@ cmd_init() {
         printf 'Warning: could not link %s/git-watchdog\n' "$BIN_DIR" >&2
     fi
 
-    # 5. Load the completion from ~/.bashrc so that "git watchdog <TAB>" works too.
-    bashrc_source_completion "$completion_file"
-
-    # 6. Snap: start the daemon at desktop login.
+    # 5. Snap: start the daemon at desktop login.
     if [ -n "${SNAP:-}" ]; then
         local autostart
         autostart="$(snap_autostart_file)"
@@ -1221,37 +1229,6 @@ cmd_init() {
     fi
 
     printf '\nNext: review %s, then run "git watchdog" to start the daemon.\n' "$CONFIG_FILE"
-}
-
-# Append a guarded "source" line for the completion file to ~/.bashrc, unless the
-# file is already mentioned there. The guard keeps new shells working when the
-# file is gone (e.g. after the snap was removed).
-bashrc_source_completion() {
-    local file="$1" bashrc="$REAL_HOME/.bashrc" line shown path_expr="$1"
-    shown="$file"
-    case "$file" in
-        "$REAL_HOME"/*)
-            shown='~'"/${file#"$REAL_HOME"/}"
-            path_expr="\$HOME/${file#"$REAL_HOME"/}"
-            ;;
-    esac
-    line="if [ -f \"$path_expr\" ]; then . \"$path_expr\"; fi  # git-watchdog completion"
-    if [ -n "${SNAP:-}" ]; then
-        # The snap may not touch ~/.bashrc; leave it to the user.
-        printf 'Bashrc:      for "git watchdog <TAB>" add this line to ~/.bashrc:\n  %s\n' "$line"
-    elif [ ! -f "$bashrc" ]; then
-        printf 'Bashrc:      %s not found; for "git watchdog <TAB>" source %s in your shell rc\n' "$bashrc" "$shown"
-    elif ! [ -r "$bashrc" ]; then
-        printf 'Warning: cannot read %s; for "git watchdog <TAB>" add:\n  %s\n' "$bashrc" "$line" >&2
-    elif grep -qF -e "$file" -e "$shown" -e "$path_expr" "$bashrc" 2>/dev/null; then
-        printf 'Bashrc:      %s already loads the completion\n' "$bashrc"
-    elif [ -n "$DRY_RUN" ]; then
-        printf '[dry-run] would append to %s:\n  %s\n' "$bashrc" "$line"
-    elif printf '\n%s\n' "$line" >>"$bashrc" 2>/dev/null; then
-        printf 'Bashrc:      %s now loads the completion (open a new shell)\n' "$bashrc"
-    else
-        printf 'Warning: cannot write %s; for "git watchdog <TAB>" add:\n  %s\n' "$bashrc" "$line" >&2
-    fi
 }
 
 # The snap starts its daemon at desktop login from this file (see snapcraft.yaml).
@@ -1272,10 +1249,9 @@ EOF
 }
 
 # Undo everything init and the daemon did: stop the daemon, restore all remotes,
-# remove the git command link, the completion and its ~/.bashrc line, the log
-# and the lock. The config (with its tokens) is kept unless --remove-config.
+# remove the git command link, the completion, the log and the lock. The config (with its tokens) is kept unless --remove-config.
 cmd_uninstall() {
-    local remove_config="" pid link file bashrc="$REAL_HOME/.bashrc" tmp
+    local remove_config="" pid link file
     case "$1" in
         --remove-config) remove_config=1 ;;
         "") ;;
@@ -1323,19 +1299,9 @@ cmd_uninstall() {
         if [ -n "$DRY_RUN" ]; then printf '[dry-run] would remove %s\n' "$LOCK_DIR"; else rm -rf "$LOCK_DIR"; fi
     fi
 
-    # 4. The completion line in ~/.bashrc (rewritten in place to keep its
-    #    permissions and any symlink). The snap cannot read ~/.bashrc.
-    if [ -n "${SNAP:-}" ]; then
-        printf 'If you added it, remove the line ending in "# git-watchdog completion" from ~/.bashrc\n'
-    elif [ -f "$bashrc" ] && grep -q '# git-watchdog completion$' "$bashrc" 2>/dev/null; then
-        if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would remove the git-watchdog completion line from %s\n' "$bashrc"
-        elif tmp="$(mktemp)" && grep -v '# git-watchdog completion$' "$bashrc" >"$tmp" && cat "$tmp" >"$bashrc"; then
-            printf 'Removed the git-watchdog completion line from %s\n' "$bashrc"
-        else
-            printf 'Warning: could not edit %s; remove the line ending in "# git-watchdog completion" yourself\n' "$bashrc" >&2
-        fi
-        [ -n "${tmp:-}" ] && rm -f "$tmp"
+    # 4. The snap may not touch ~/.local; the user created the completion link.
+    if [ -n "${SNAP:-}" ] && [ -L "$COMPLETION_DIR/git-watchdog" ]; then
+        printf 'Remove the completion link yourself: rm %s/git-watchdog\n' "$COMPLETION_DIR"
     fi
 
     # 5. Config, only on request.
