@@ -1,6 +1,6 @@
 name: git-watchdog
 base: core26
-version: '0.0.0'
+version: '0.1.0'
 title: git-watchdog
 license: MIT
 summary: Read-only Git remotes while selected processes (e.g. AI agents) run
