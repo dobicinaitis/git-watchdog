@@ -5,6 +5,8 @@
 
 ![](snap/local/logo.png)
 
+## How it works
+
 While read-only mode is active, each matching remote is modified as follows:
 
 - The fetch URL is replaced with an HTTPS URL containing a **read-only token**:
@@ -18,9 +20,10 @@ While read-only mode is active, each matching remote is modified as follows:
 
 When no matching process remains, the original `url` and `pushurl` values are restored exactly as they were.
 
-## How it works
+### Details
 
-- **Stateless.** The original remote configuration is saved, masked, inside each repository's own `.git/config`:
+- The process is **stateless.** Original remote configuration is saved, masked, inside each repository's own
+  `.git/config`:
 
     ```toml
     [git-watchdog "origin"]
@@ -49,48 +52,61 @@ When no matching process remains, the original `url` and `pushurl` values are re
   reinstall), the daemon restarts itself, and `git watchdog` replaces a daemon that started before the current program
   was installed.
 
-## Install from source
+## Install
 
-Requirements: `bash` (3.2+), `git`, `pgrep`/`ps`, and standard POSIX tools such as `awk` and `od`.
+Install the snap from the Snap Store, then create the config and save a read-only token for your Git host:
 
 ```bash
-git clone git@github.com:dobicinaitis/git-watchdog.git
-./git-watchdog/git-watchdog.sh init # config, completion, `git watchdog`
-git watchdog init gitlab.com        # asks for the read-only token
-git watchdog                        # starts the daemon, shows status
+sudo snap install git-watchdog
+git watchdog init gitlab.com   # asks for the read-only token
+git watchdog                   # shows the status
 ```
 
-Example output:
+The snap needs `system-observe` to see other processes. Until the Snap Store grants it automatically, connect it by
+hand:
 
-```text
-git-watchdog init
-
-  ✓ Tools        all required tools are installed
-  ✓ Config       ~/.config/git-watchdog/config.yaml (created)
-  ✓ Remote       gitlab.com (read-only token saved)
-  ✓ Completion   ~/.local/share/bash-completion/completions/git-watchdog
-  ✓ Git command  git watchdog (~/.local/bin/git-watchdog)
-
-Next steps
-  1. Review the config (source directories, process names, hosts):
-     ~/.config/git-watchdog/config.yaml
-  2. Start the daemon and see its status:
-     git watchdog
+```bash
+sudo snap connect git-watchdog:system-observe
 ```
 
-Symbols are colored on a terminal (set `NO_COLOR` to turn that off) and fall back to ASCII outside UTF-8 locales.
+To install from a Git checkout instead (Linux or macOS), see [Install from source](docs/install-from-source.md).
 
-`init` performs the following actions and is safe to run repeatedly:
+`init` writes the config and prints the next steps. It's safe to run repeatedly. The token is read from a hidden
+prompt, `$GIT_WATCHDOG_TOKEN`, or stdin, so it does not appear in shell history.
 
-1. Creates `~/.config/git-watchdog/config.yaml` with mode `600` and its parent directory with mode `700`.
+### Bash completion
 
-2. If a host is specified, stores the read-only token for that host. The token is read from a hidden prompt,
-   `$GIT_WATCHDOG_TOKEN`, or stdin, so it does not appear in shell history.
+The snap provides Bash completion for `git-watchdog`. For `git watchdog <TAB>` to work, `init` prints a command to link
+the snap's completion script into the `bash-completion` directory, which the snap is not allowed to write itself.
 
-3. Installs Bash completion at: `~/.local/share/bash-completion/completions/git-watchdog`.
+Run these commands to enable `git` completion:
 
-4. Creates `~/.local/bin/git-watchdog` as a link to the script, unless `git-watchdog` is already available on `PATH`.
-   This allows `git watchdog` to work as a Git subcommand.
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+ln -sf ~/snap/git-watchdog/common/git-watchdog.bash ~/.local/share/bash-completion/completions/git-watchdog
+```
+
+### Start at login
+
+The snap starts the daemon when you log in to your desktop using snap's `autostart` support.
+
+`init` also starts the daemon right away, so it runs without logging out and back in.
+
+Without a desktop session, such as over SSH, the daemon starts the first time you run `git watchdog`.
+
+### Snap details
+
+- The snap keeps its configuration in `~/snap/git-watchdog/common/config.yaml` instead of
+  `~/.config/git-watchdog/config.yaml`, because a confined snap cannot access `~/.config` without the super-privileged
+  `personal-files` interface. The folder survives snap updates and is removed together with the snap.
+
+- Snaps have a private `/tmp`, so the snap's log is located at:
+
+  `/tmp/snap-private-tmp/snap.git-watchdog/tmp/git-watchdog-<uid>.log`
+
+  Use `git watchdog logs` to read it.
+
+- The `home` interface covers repositories under `$HOME`, but not repositories inside hidden top-level directories.
 
 ### Tokens
 
@@ -128,11 +144,13 @@ Example:
 
 ```bash
 $ git watchdog
-Read-only mode: ACTIVE
-  triggered by: claude (pid 48213)
-Daemon:         running (pid 47102)
-Config:         /home/me/.config/git-watchdog/config.yaml
-Log:            /tmp/git-watchdog-1000.log
+git-watchdog status
+
+  ! Read-only    ACTIVE (pushing is blocked)
+                 triggered by claude (pid 48213)
+  ✓ Daemon       running (pid 47102)
+  ✓ Config       ~/.config/git-watchdog/config.yaml
+  ✓ Log          /tmp/git-watchdog-1000.log
 ```
 
 Stopping the daemon leaves repositories in their current state. If matching processes are still running, those
@@ -144,9 +162,8 @@ git watchdog revert
 
 ## Configuration
 
-The configuration file is:
-
-`~/.config/git-watchdog/config.yaml`
+The configuration file is `~/snap/git-watchdog/common/config.yaml` for the snap (see [Snap details](#snap-details)),
+or `~/.config/git-watchdog/config.yaml` when [installed from source](docs/install-from-source.md).
 
 See `config.example.yaml` for an example.
 
@@ -192,166 +209,29 @@ Anchors, multiline strings, and inline maps are not supported.
 
 ## Files
 
-| Path                                      | Purpose                                                           |
-|-------------------------------------------|-------------------------------------------------------------------|
-| `~/.config/git-watchdog/config.yaml`      | Configuration (mode `600`; contains tokens); snap: see below      |
-| `/tmp/git-watchdog-<uid>.log`             | Log (mode `600`; rotated at 1 MiB; tokens are redacted)           |
-| `/tmp/git-watchdog-<uid>.lock/`           | Daemon lock and PID                                               |
-| `.git/config` `[git-watchdog "<remote>"]` | Masked original URLs and their key while read-only mode is active |
+| Path                                      | Purpose                                                                                          |
+|-------------------------------------------|--------------------------------------------------------------------------------------------------|
+| `~/snap/git-watchdog/common/config.yaml`  | Configuration (mode `600`; contains tokens)                                                      |
+| `~/.config/git-watchdog/config.yaml`      | Configuration when [installed from source](docs/install-from-source.md)                          |
+| `/tmp/git-watchdog-<uid>.log`             | Log (mode `600`; rotated at 1 MiB; tokens are redacted); snap: see [Snap details](#snap-details) |
+| `/tmp/git-watchdog-<uid>.lock/`           | Daemon lock and PID                                                                              |
+| `.git/config` `[git-watchdog "<remote>"]` | Masked original URLs and their key while read-only mode is active                                |
 
 ## Uninstall
-
-```bash
-git watchdog uninstall
-```
-
-This stops the daemon, restores every remote, and removes:
-
-- the `git watchdog` link;
-
-- the Bash completion;
-
-- the log; and
-
-- the daemon lock.
-
-The configuration file is kept so a later `init` can reuse it. Add `--remove-config` to delete it, including your stored
-tokens.
-
-With `--dry-run`, the command only reports what it would do.
-
-For the snap, run:
 
 ```bash
 git watchdog uninstall
 sudo snap remove git-watchdog
 ```
 
-If you created the completion link described in the snap section, remove it as well:
+`git watchdog uninstall` stops the daemon and restores every remote. If you created the completion link described in
+[Bash completion](#bash-completion), remove it as well:
 
 ```bash
 rm ~/.local/share/bash-completion/completions/git-watchdog
 ```
 
-## Start at login
-
-### Snap (Linux)
-
-The snap starts the daemon when you log in to your desktop using snap's `autostart` support. `init`
-creates:
-
-`~/snap/git-watchdog/current/.config/autostart/git-watchdog-daemon.desktop`
-
-Without a desktop session, such as over SSH, the daemon starts the first time you run `git watchdog`.
-
-The snap also provides Bash completion for `git-watchdog` through snapd's `completer`. For `git watchdog <TAB>`, `init`
-copies the completion script to:
-
-`~/snap/git-watchdog/common/git-watchdog.bash`
-
-and prints a command to link it into the `bash-completion` directory, which the snap is not allowed to write to:
-
-```bash
-mkdir -p ~/.local/share/bash-completion/completions && ln -sf ~/snap/git-watchdog/common/git-watchdog.bash ~/.local/share/bash-completion/completions/git-watchdog
-```
-
-`bash-completion` loads it only when you press TAB, so it does not slow down shell startup. The target is deleted when
-the snap is removed; the dangling link is then ignored.
-
-The snap keeps its configuration in `~/snap/git-watchdog/common/config.yaml` instead of
-`~/.config/git-watchdog/config.yaml`, because a confined snap cannot access `~/.config` without the super-privileged
-`personal-files` interface. The folder survives snap updates and is removed together with the snap.
-
-```bash
-snapcraft pack
-sudo snap install --dangerous git-watchdog_0.1.0_amd64.snap
-sudo snap connect git-watchdog:system-observe
-git watchdog init gitlab.com
-```
-
-Notes:
-
-- `system-observe` (needed to see other processes) is not connected automatically for locally built snaps, so the
-  `snap connect` command is required.
-
-- Snaps have a private `/tmp`, so the snap's log is located at:
-
-  `/tmp/snap-private-tmp/snap.git-watchdog/tmp/git-watchdog-<uid>.log`
-
-  Use `git watchdog logs` to read it.
-
-- The `home` interface covers repositories under `$HOME`, but not repositories inside hidden top-level directories.
-
-### systemd user service (Linux, without snap)
-
-Create:
-
-`~/.config/systemd/user/git-watchdog.service`
-
-```toml
-[Unit]
-Description = git-watchdog
-
-[Service]
-ExecStart = %h/.local/bin/git-watchdog daemon
-Restart = always
-
-[Install]
-WantedBy = default.target
-```
-
-Then enable and start the service:
-
-```bash
-systemctl --user enable --now git-watchdog
-```
-
-### launchd (macOS)
-
-Create:
-
-`~/Library/LaunchAgents/dev.git-watchdog.plist`
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-    <dict>
-        <key>Label</key>
-        <string>dev.git-watchdog</string>
-        <key>ProgramArguments</key>
-        <array>
-            <string>/Users/YOU/.local/bin/git-watchdog</string>
-            <string>daemon</string>
-        </array>
-        <key>EnvironmentVariables</key>
-        <dict>
-            <key>PATH</key>
-            <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        </dict>
-        <key>RunAtLoad</key>
-        <true/>
-        <key>KeepAlive</key>
-        <true/>
-    </dict>
-</plist>
-```
-
-Then load it:
-
-```bash
-launchctl load ~/Library/LaunchAgents/dev.git-watchdog.plist
-```
-
-## macOS notes
-
-The script uses only Bash 3.2 features and BSD-compatible tool flags, so it runs with the stock `/bin/bash`.
-
-On macOS, `pgrep -x` matches the process name as reported by:
-
-```bash
-ps -o comm
-```
+For a source install, see [Uninstall](docs/install-from-source.md#uninstall) in the source install guide.
 
 ## Security notes
 
@@ -366,13 +246,4 @@ ps -o comm
 
 ## Development
 
-Run the test suite with:
-
-```bash
-tests/run-tests.sh
-```
-
-The tests create throwaway repositories and a fake agent process in a temporary directory, using their own `HOME` and
-log/lock directories.
-
-[CI](.github/workflows/ci.yml) runs ShellCheck and the test suite on Ubuntu and macOS using the stock Bash 3.2.
+See the [developer guide](docs/dev-guide.md) for running the tests, CI and building the snap.

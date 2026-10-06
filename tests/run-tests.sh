@@ -100,6 +100,9 @@ run_suite() {
 
     # --- tool check and init
     check "check reports all tools present" eval "gwd check >/dev/null"
+    check "check lists each tool" eval "gwd check | grep -q '^  . git  *[^ ]'"
+    check "status without config fails" eval "! gwd status >/dev/null"
+    check "status without config suggests init" eval "gwd status | grep -q 'git watchdog init'"
     printf '# user bashrc\n' >"$HOME/.bashrc"
     local bashrc_before
     bashrc_before="$(cat "$HOME/.bashrc")"
@@ -116,12 +119,22 @@ run_suite() {
         eq "git watchdog <TAB> completes via bash-completion" "status start stop" "$(complete_git_watchdog st)"
     fi
     # Inside the snap the completion lives in the snap's data dir.
-    local snap_init_out
+    # The snap init also starts the daemon; give it a config whose agent is not
+    # running, so it leaves the test repositories alone.
+    local snap_init_out snap_cfg="$HOME/snap/git-watchdog/common/config.yaml"
+    mkdir -p "$(dirname "$snap_cfg")"
+    gwd __default-config | sed -e "s#- \$HOME\$#- \$HOME/src#" -e "s#^  - claude\$#  - $FAKE_PROC#" -e "/^  - claude-desktop\$/d" >"$snap_cfg"
     snap_init_out="$(SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON="$HOME/snap/git-watchdog/common" SNAP_USER_DATA="$HOME/snap/git-watchdog/x1" gwd init)"
     check "snap init writes the autostart entry" grep -q '^Exec=git-watchdog.daemon$' "$HOME/snap/git-watchdog/x1/.config/autostart/git-watchdog-daemon.desktop"
     check "snap init writes completion to its data dir" test -f "$HOME/snap/git-watchdog/common/git-watchdog.bash"
-    check "snap init keeps its config in its data dir" test -f "$HOME/snap/git-watchdog/common/config.yaml"
+    check "snap init keeps its config in its data dir" grep -q "Config .*~/snap/git-watchdog/common/config.yaml" <<<"$snap_init_out"
     eq "snap init leaves .bashrc alone" "$bashrc_before" "$(cat "$HOME/.bashrc")"
+    local snap_pid
+    snap_pid="$(cat "$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock/pid" 2>/dev/null)"
+    check "snap init starts the daemon" sh -c "kill -0 '$snap_pid' 2>/dev/null"
+    check "snap init reports the running daemon" grep -q "Daemon .*running (pid $snap_pid)" <<<"$snap_init_out"
+    gwd stop >/dev/null
+    check "snap init --dry-run does not start the daemon" eval "SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON='$HOME/snap/git-watchdog/common' SNAP_USER_DATA='$HOME/snap/git-watchdog/x1' gwd init --dry-run | grep -q 'would start the daemon' && ! test -d '$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock'"
     local link_cmd
     link_cmd="$(grep '^ *mkdir -p .* && ln -sf ' <<<"$snap_init_out")"
     check "snap init prints the completion link command" test -n "$link_cmd"
@@ -173,9 +186,10 @@ EOF
     masked_snapshot="$(snapshot)"
     gwd sync >/dev/null
     eq "second sync is idempotent" "$masked_snapshot" "$(snapshot)"
+    check "sync summary reports nothing to change" eval "gwd sync | grep -q 'Remotes .*nothing to change'"
     out="$(gwd status -v --dry-run)"
-    check "status shows ACTIVE" grep -q 'Read-only mode: ACTIVE' <<<"$out"
-    check "status names process and pid" grep -q "triggered by: $FAKE_PROC (pid $FAKE_PID)" <<<"$out"
+    check "status shows ACTIVE" grep -q 'Read-only .*ACTIVE' <<<"$out"
+    check "status names process and pid" grep -q "triggered by $FAKE_PROC (pid $FAKE_PID)" <<<"$out"
     check "status -v lists masked remotes" grep -q "src/app (origin)" <<<"$out"
     check "git push is refused" sh -c "! git -C '$HOME/src/app' push origin HEAD 2>/dev/null"
 
@@ -216,8 +230,8 @@ EOF
     cp "$T/cfg.full" "$CFG" # config with hosts again
     GIT_WATCHDOG_TOKEN="$TOKEN" gwd init gitlab.com >/dev/null
     out="$(gwd status)"
-    check "status starts the daemon" grep -q 'Daemon:         running' <<<"$out"
-    check "status shows inactive" grep -q 'Read-only mode: inactive' <<<"$out"
+    check "status starts the daemon" grep -q 'Daemon .*running' <<<"$out"
+    check "status shows inactive" grep -q 'Read-only .*inactive' <<<"$out"
     start_fake
     sleep 3
     eq "daemon masks when process starts" "https://oauth2:$TOKEN@gitlab.com/group/app.git" "$(url "$HOME/src/app" origin)"
@@ -261,8 +275,10 @@ EOF
     gwd start >/dev/null
     start_fake
     sleep 3
-    gwd --dry-run uninstall >/dev/null
-    check "uninstall --dry-run keeps the daemon" eval "gwd status --dry-run | grep -q 'Daemon:         running'"
+    out="$(gwd --dry-run uninstall)"
+    check "uninstall --dry-run reports what it would remove" grep -q 'Completion .*would remove ~/.local/share/bash-completion' <<<"$out"
+    check "uninstall --dry-run reports the remotes" grep -q 'Remotes .*would apply' <<<"$out"
+    check "uninstall --dry-run keeps the daemon" eval "gwd status --dry-run | grep -q 'Daemon .*running'"
     check "uninstall --dry-run keeps read-only mode" grep -q '^git-watchdog-read-only://' <<<"$(pushurl "$HOME/src/app" origin)"
     gwd uninstall >/dev/null
     stop_fake

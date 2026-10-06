@@ -55,6 +55,9 @@ DRY_RUN=""
 VERBOSE=""
 ECHO_LOG=""          # also print log lines to stdout (interactive commands)
 LOG_DISABLED=""
+CHANGES=0            # changes announced by the last reconcile
+ERRORS=0             # errors logged by the last reconcile
+REPO_COUNT=0         # repositories checked by the last reconcile
 
 # Loaded configuration; see reset_config for the defaults.
 CFG_LOADED=""
@@ -126,6 +129,7 @@ log() {
     if [ "$level" = DEBUG ] && [ -z "$VERBOSE" ] && [ -z "$ECHO_LOG" ]; then
         return 0
     fi
+    [ "$level" = ERROR ] && ERRORS=$((ERRORS + 1))
     line="$(date '+%Y-%m-%d %H:%M:%S') [$level] $(redact "$*")"
     if ensure_log_file; then
         printf '%s\n' "$line" >>"$LOG_FILE"
@@ -204,22 +208,19 @@ require_tools() {
 }
 
 cmd_check() {
-    local t status=0
-    printf 'Required tools:\n'
+    local t missing
+    ui_header check
     for t in $REQUIRED_TOOLS; do
         if have "$t"; then
-            printf '  [ok]      %-10s %s\n' "$t" "$(command -v "$t")"
+            report ok "$t" "$(command -v "$t")"
         else
-            printf '  [MISSING] %s\n' "$t"
-            status=1
+            report error "$t" "missing"
         fi
     done
-    if [ "$status" -eq 0 ]; then
-        printf 'All required tools are installed.\n'
-    else
-        printf 'Some required tools are missing.\n'
-    fi
-    return "$status"
+    missing="$(missing_tools)"
+    [ -n "$missing" ] && add_step "Install the missing tools with your package manager:" "$missing"
+    print_steps
+    [ -z "$missing" ]
 }
 
 # ------------------------------------------------------------------------ config
@@ -715,6 +716,7 @@ EOF
 
 # announce REPO ACTION - log an action, or what would be done in dry-run mode.
 announce() {
+    CHANGES=$((CHANGES + 1))
     if [ -n "$DRY_RUN" ]; then
         log DRY-RUN "$1: would $2"
     else
@@ -855,6 +857,7 @@ EOF
 # reconcile ACTIVE(1|"") - bring every repository to the wanted state.
 reconcile() {
     local active="$1" repo count=0
+    CHANGES=0 ERRORS=0
     while IFS= read -r repo; do
         [ -n "$repo" ] || continue
         reconcile_repository "$repo" "$active"
@@ -862,7 +865,26 @@ reconcile() {
     done <<EOF
 $(repositories)
 EOF
+    REPO_COUNT="$count"
     log DEBUG "checked $count repositories (read-only mode: ${active:+active}${active:-inactive})"
+}
+
+# One summary line for the last reconcile.
+report_reconcile() {
+    local repos="$REPO_COUNT repositories checked" changes="$CHANGES changes" hint
+    [ "$REPO_COUNT" -eq 1 ] && repos="1 repository checked"
+    [ "$CHANGES" -eq 1 ] && changes="1 change"
+    if [ "$ERRORS" -gt 0 ]; then
+        hint="run again with -v for details"
+        [ -n "$ECHO_LOG" ] && hint="see the log lines above"
+        report error "Remotes" "$ERRORS error(s), $hint" "($repos)"
+    elif [ "$CHANGES" -eq 0 ]; then
+        report ok "Remotes" "nothing to change" "($repos)"
+    elif [ -n "$DRY_RUN" ]; then
+        report dry "Remotes" "would apply $changes" "($repos)"
+    else
+        report ok "Remotes" "applied $changes" "($repos)"
+    fi
 }
 
 # List remotes currently in read-only mode: "repo<TAB>remote".
@@ -1009,35 +1031,37 @@ start_daemon() {
 cmd_start() {
     local pid
     if pid="$(daemon_pid)" && ! daemon_is_stale; then
-        printf 'git-watchdog daemon already running (pid %s)\n' "$pid"
+        report ok "Daemon" "already running (pid $pid)"
         return 0
     fi
     pid="$(start_daemon)" || die "failed to start the daemon, see $LOG_FILE"
-    printf 'git-watchdog daemon started (pid %s)\n' "$pid"
+    report ok "Daemon" "started (pid $pid)"
 }
 
 cmd_stop() {
     local pid
     if ! pid="$(daemon_pid)"; then
-        printf 'git-watchdog daemon is not running\n'
+        report ok "Daemon" "not running"
         return 0
     fi
     if [ -n "$DRY_RUN" ]; then
-        printf '[dry-run] would stop the daemon (pid %s)\n' "$pid"
+        report dry "Daemon" "would stop (pid $pid)"
         return 0
     fi
     stop_daemon "$pid" || die "could not stop the daemon (pid $pid)"
-    printf 'git-watchdog daemon stopped (pid %s)\n' "$pid"
+    report ok "Daemon" "stopped (pid $pid)"
 }
 
 # ------------------------------------------------------------------------ commands
 
 cmd_status() {
-    local pid procs repo name count=0
+    local pid procs p n repo name count=0 masked=""
+    ui_header status
     load_config
     if [ -z "$CFG_LOADED" ]; then
-        printf 'git-watchdog is not configured yet: %s not found.\n' "$CONFIG_FILE"
-        printf "Run 'git watchdog init' to create it.\n"
+        report error "Config" "$(tilde "$CONFIG_FILE")" "(not found)"
+        add_step "Create the config:" "git watchdog init"
+        print_steps
         return 1
     fi
     if [ -z "$DRY_RUN" ]; then
@@ -1047,41 +1071,50 @@ cmd_status() {
     fi
     procs="$(matching_processes_sorted)"
 
+    # ACTIVE is the protection doing its job, but pushing is blocked: a warning, not an error.
     if [ -n "$procs" ]; then
-        printf 'Read-only mode: ACTIVE\n'
-        printf '%s\n' "$procs" | while IFS=' ' read -r p n; do
-            printf '  triggered by: %s (pid %s)\n' "$n" "$p"
-        done
+        report warn "Read-only" "ACTIVE" "(pushing is blocked)"
+        while IFS=' ' read -r p n; do
+            report_more "triggered by $n (pid $p)"
+        done <<EOF
+$procs
+EOF
     else
-        printf 'Read-only mode: inactive (no matching processes running)\n'
+        report ok "Read-only" "inactive" "(no matching processes running)"
     fi
     if [ -n "$pid" ]; then
-        printf 'Daemon:         running (pid %s)\n' "$pid"
+        report ok "Daemon" "running (pid $pid)"
     elif [ -n "$DRY_RUN" ]; then
-        printf 'Daemon:         not running (not started in dry-run mode)\n'
+        report dry "Daemon" "not running" "(not started in dry-run mode)"
     else
-        printf 'Daemon:         FAILED to start, see %s\n' "$LOG_FILE"
+        report error "Daemon" "failed to start, see $(tilde "$LOG_FILE")"
+        add_step "See why the daemon did not start:" "git watchdog logs"
     fi
-    printf 'Config:         %s\n' "$CONFIG_FILE"
-    printf 'Log:            %s\n' "$LOG_FILE"
+    report ok "Config" "$(tilde "$CONFIG_FILE")"
+    report ok "Log" "$(tilde "$LOG_FILE")"
 
     if [ -n "$VERBOSE" ]; then
-        printf 'Remotes in read-only mode:\n'
+        masked="$(list_masked)"
+        [ -n "$masked" ] && count="$(printf '%s\n' "$masked" | wc -l | tr -d ' ')"
+        case "$count" in
+            0) report ok "Remotes" "none in read-only mode" ;;
+            1) report ok "Remotes" "1 in read-only mode" ;;
+            *) report ok "Remotes" "$count in read-only mode" ;;
+        esac
         while IFS="$TAB" read -r repo name; do
-            [ -n "$repo" ] || continue
-            printf '  %s (%s)\n' "$repo" "$name"
-            count=$((count + 1))
+            [ -n "$repo" ] && report_more "$(tilde "$repo") ($name)"
         done <<EOF
-$(list_masked)
+$masked
 EOF
-        [ "$count" -gt 0 ] || printf '  none\n'
     fi
+    print_steps
 }
 
 cmd_sync() {
     local procs active=""
-    ECHO_LOG=1
     load_config || die "no config at $CONFIG_FILE; run 'git watchdog init' first"
+    ui_header sync
+    ECHO_LOG=1
     procs="$(matching_processes_sorted)"
     if [ -n "$procs" ]; then
         active=1
@@ -1090,17 +1123,25 @@ cmd_sync() {
         log INFO "read-only mode inactive, no matching processes running"
     fi
     reconcile "$active"
+    printf '\n'
+    report_reconcile
 }
 
 cmd_revert() {
     local pid
-    ECHO_LOG=1
     load_config || die "no config at $CONFIG_FILE; run 'git watchdog init' first"
+    ui_header revert
     if pid="$(daemon_pid)" && [ -n "$(matching_processes)" ]; then
-        printf 'Warning: the daemon (pid %s) will re-apply read-only mode while matching processes run.\n' "$pid" >&2
-        printf "         Run 'git watchdog stop' first to keep the original remotes.\n" >&2
+        {
+            report warn "Daemon" "running (pid $pid), it re-applies read-only mode while matching processes run"
+            report_more "run 'git watchdog stop' first to keep the original remotes"
+            printf '\n'
+        } >&2
     fi
+    ECHO_LOG=1
     reconcile ""
+    printf '\n'
+    report_reconcile
 }
 
 completion_script() {
@@ -1202,6 +1243,16 @@ report() {
     printf '\n'
 }
 
+# report_more TEXT - a continuation line, aligned with the text of report.
+report_more() {
+    printf '%17s%s\n' "" "$1"
+}
+
+# ui_header COMMAND - the title line of a command's output.
+ui_header() {
+    printf '%sgit-watchdog %s%s%s\n\n' "$C_BOLD" "$1" "$C_RESET" "${DRY_RUN:+ ${C_DIM}(dry run, nothing is changed)${C_RESET}}"
+}
+
 # add_step TEXT [COMMAND] - remember a follow-up step for the user.
 add_step() {
     NEXT_STEPS="$NEXT_STEPS$1$TAB${2:-}$NL"
@@ -1222,7 +1273,7 @@ EOF
 }
 
 cmd_init() {
-    local host="$1" token="" existing completion_file="$COMPLETION_DIR/git-watchdog" autostart link_cmd
+    local host="$1" token="" existing completion_file="$COMPLETION_DIR/git-watchdog" autostart link_cmd pid
 
     # Ask for the token first, so the summary below is not interrupted.
     if [ -n "$host" ]; then
@@ -1238,8 +1289,7 @@ cmd_init() {
         fi
     fi
 
-    ui_setup
-    printf '%sgit-watchdog init%s%s\n\n' "$C_BOLD" "$C_RESET" "${DRY_RUN:+ ${C_DIM}(dry run, nothing is changed)${C_RESET}}"
+    ui_header init
 
     # main() already stopped if a required tool is missing.
     report ok "Tools" "all required tools are installed"
@@ -1328,11 +1378,23 @@ cmd_init() {
         else
             report error "Autostart" "could not write $(tilde "$autostart")" "(the daemon starts with \"git watchdog\" only)"
         fi
+        # Start it now too, so it runs without logging out and in.
+        if [ -n "$DRY_RUN" ]; then
+            report dry "Daemon" "would start the daemon"
+        elif pid="$(start_daemon)"; then
+            report ok "Daemon" "running (pid $pid)"
+        else
+            report error "Daemon" "could not start, see $(tilde "$LOG_FILE")"
+        fi
     fi
 
     add_step "Review the config (source directories, process names, hosts):" "$(tilde "$CONFIG_FILE")"
     [ -z "$host" ] && add_step "Add a host and its read-only token:" "git watchdog init gitlab.com"
-    add_step "Start the daemon and see its status:" "git watchdog"
+    if [ -n "${SNAP:-}" ]; then
+        add_step "See its status:" "git watchdog"
+    else
+        add_step "Start the daemon and see its status:" "git watchdog"
+    fi
     print_steps
 }
 
@@ -1356,13 +1418,13 @@ EOF
 # Undo everything init and the daemon did: stop the daemon, restore all remotes,
 # remove the git command link, the completion, the log and the lock. The config (with its tokens) is kept unless --remove-config.
 cmd_uninstall() {
-    local remove_config="" pid link file
+    local remove_config="" pid link file label
     case "$1" in
         --remove-config) remove_config=1 ;;
         "") ;;
         *) die "unknown option for uninstall: $1 (expected --remove-config)" ;;
     esac
-    ECHO_LOG=1
+    ui_header uninstall
 
     # 1. Daemon (a service manager may restart it, e.g. a systemd unit).
     if pid="$(daemon_pid)"; then
@@ -1373,13 +1435,18 @@ cmd_uninstall() {
                 die "the daemon was started again (pid $(daemon_pid)), probably by a service manager; disable that and run uninstall again"
             fi
         fi
+    else
+        report ok "Daemon" "not running"
     fi
 
-    # 2. Remotes.
+    # 2. Remotes (the log lines of each change only with -v; the log is removed below).
     if load_config; then
+        [ -n "$VERBOSE" ] && ECHO_LOG=1
         reconcile ""
+        report_reconcile
+        ECHO_LOG=""
     else
-        printf 'No config at %s; no repositories to restore.\n' "$CONFIG_FILE"
+        report ok "Remotes" "nothing to restore" "(no config)"
     fi
 
     # 3. Files created by init and the daemon.
@@ -1389,41 +1456,51 @@ cmd_uninstall() {
         "$(snap_autostart_file)" \
         "$LOG_FILE" "$LOG_FILE.1"; do
         [ -e "$file" ] || [ -L "$file" ] || continue
+        case "$file" in
+            "$link") label="Git command" ;;
+            *.desktop) label="Autostart" ;;
+            "$LOG_FILE"*) label="Log" ;;
+            *) label="Completion" ;;
+        esac
         # Only remove a git-watchdog link, never another tool of the same name.
         if [ "$file" = "$link" ] && { [ ! -L "$link" ] || ! readlink "$link" | grep -q 'git-watchdog'; }; then
-            printf 'Keeping %s (not a link to git-watchdog)\n' "$link"
+            report warn "$label" "kept $(tilde "$link")" "(not a link to git-watchdog)"
             continue
         fi
         if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would remove %s\n' "$file"
+            report dry "$label" "would remove $(tilde "$file")"
+        elif rm -f "$file"; then
+            report ok "$label" "removed $(tilde "$file")"
         else
-            rm -f "$file" && printf 'Removed %s\n' "$file"
+            report error "$label" "could not remove $(tilde "$file")"
         fi
     done
     if [ -d "$LOCK_DIR" ] && [ -O "$LOCK_DIR" ] && ! daemon_pid >/dev/null; then
-        if [ -n "$DRY_RUN" ]; then printf '[dry-run] would remove %s\n' "$LOCK_DIR"; else rm -rf "$LOCK_DIR"; fi
+        if [ -n "$DRY_RUN" ]; then report dry "Lock" "would remove $LOCK_DIR"; else rm -rf "$LOCK_DIR"; fi
     fi
 
     # 4. The snap may not touch ~/.local; the user created the completion link.
     if [ -n "${SNAP:-}" ] && [ -L "$COMPLETION_DIR/git-watchdog" ]; then
-        printf 'Remove the completion link yourself: rm %s/git-watchdog\n' "$COMPLETION_DIR"
+        report warn "Completion" "kept $(tilde "$COMPLETION_DIR")/git-watchdog" "(the snap may not remove it)"
+        add_step "Remove the completion link:" "rm $(tilde "$COMPLETION_DIR")/git-watchdog"
     fi
 
     # 5. Config, only on request.
     if [ -z "$remove_config" ]; then
-        [ -f "$CONFIG_FILE" ] && printf 'Kept %s (use --remove-config to remove it)\n' "$CONFIG_FILE"
+        [ -f "$CONFIG_FILE" ] && report ok "Config" "kept $(tilde "$CONFIG_FILE")" "(use --remove-config to remove it)"
     elif [ -f "$CONFIG_FILE" ]; then
         if [ -n "$DRY_RUN" ]; then
-            printf '[dry-run] would remove %s\n' "$CONFIG_FILE"
-        else
-            rm -f "$CONFIG_FILE" && printf 'Removed %s\n' "$CONFIG_FILE"
+            report dry "Config" "would remove $(tilde "$CONFIG_FILE")"
+        elif rm -f "$CONFIG_FILE"; then
             rmdir "$CONFIG_DIR" 2>/dev/null
+            report ok "Config" "removed $(tilde "$CONFIG_FILE")"
+        else
+            report error "Config" "could not remove $(tilde "$CONFIG_FILE")"
         fi
     fi
 
-    if [ -n "${SNAP:-}" ]; then
-        printf 'To remove the snap itself: sudo snap remove git-watchdog\n'
-    fi
+    [ -n "${SNAP:-}" ] && add_step "Remove the snap itself:" "sudo snap remove git-watchdog"
+    print_steps
 }
 
 cmd_logs() {
@@ -1498,8 +1575,11 @@ main() {
     case "$cmd" in
         help) usage; return 0 ;;
         version) printf 'git-watchdog %s\n' "$VERSION"; return 0 ;;
-        check) cmd_check; return $? ;;
         completion) completion_script; return 0 ;;
+    esac
+    ui_setup
+    case "$cmd" in
+        check) cmd_check; return $? ;;
     esac
     require_tools
     reset_config
