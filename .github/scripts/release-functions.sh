@@ -22,18 +22,21 @@ sudo snap install git-watchdog
 NOTES
 }
 
-# Sets the release version in git-watchdog.sh and snap/snapcraft.yaml.
+# Sets the release version in git-watchdog.sh, snap/snapcraft.yaml and the snap file name in docs/dev-guide.md.
 update_version() {
     local new_version=$1
     local script="$REPO_BASE_DIR/git-watchdog.sh"
     local snapcraft="$REPO_BASE_DIR/snap/snapcraft.yaml"
+    local dev_guide="$REPO_BASE_DIR/docs/dev-guide.md"
     if ! [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "Invalid version: '$new_version'" >&2
         return 1
     fi
     sed -i -E "s/^VERSION=\"[^\"]*\"$/VERSION=\"${new_version}\"/" "$script"
     sed -i -E "s/^version: '[^']*'$/version: '${new_version}'/" "$snapcraft"
-    # fail if either file was not updated
+    sed -i -E "s/git-watchdog_[0-9]+\.[0-9]+\.[0-9]+_amd64\.snap/git-watchdog_${new_version}_amd64.snap/g" "$dev_guide"
+    # fail if any file was not updated
     grep -qx "VERSION=\"${new_version}\"" "$script" || { echo "Version not set in $script" >&2; return 1; }
     grep -qx "version: '${new_version}'" "$snapcraft" || { echo "Version not set in $snapcraft" >&2; return 1; }
+    grep -qF "git-watchdog_${new_version}_amd64.snap" "$dev_guide" || { echo "Version not set in $dev_guide" >&2; return 1; }
 }

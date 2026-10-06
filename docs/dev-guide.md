@@ -23,9 +23,9 @@ to `main` (and manually via *Run workflow*):
 1. Runs [CI](../.github/workflows/ci.yml) (ShellCheck and tests); nothing is released if it fails.
 2. Calculates the next version from the [conventional commits](https://www.conventionalcommits.org/) since the latest
    `vX.Y.Z` tag. If none of them warrants a release, the run stops here.
-3. Sets the version in `git-watchdog.sh` and `snap/snapcraft.yaml`, commits it as
-   `chore: bumped release version to X.Y.Z`, tags it `vX.Y.Z`, pushes both and creates a GitHub release whose notes
-   list the commit subjects (without `chore`/`ci`/`cleanup` commits).
+3. Sets the version in `git-watchdog.sh`, `snap/snapcraft.yaml` and the snap file name in `docs/dev-guide.md`,
+   commits it as `chore: bumped release version to X.Y.Z`, tags it `vX.Y.Z`, pushes both and creates a GitHub release
+   whose notes list the commit subjects (without `chore`/`ci`/`cleanup` commits).
 4. Builds the snap from the tag, checks `git-watchdog version` and publishes it to the Snap Store `stable` channel.
 
 The version bump commit does not trigger another release (it is pushed with `GITHUB_TOKEN`, and the workflow skips
@@ -51,7 +51,7 @@ Required setup:
 
 ```bash
 snapcraft pack
-sudo snap install --dangerous git-watchdog_0.1.0_amd64.snap
+sudo snap install --dangerous git-watchdog_0.0.0_amd64.snap
 sudo snap connect git-watchdog:system-observe
 git watchdog init gitlab.com
 ```
