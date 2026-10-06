@@ -57,7 +57,7 @@ Create:
 
 `~/.config/systemd/user/git-watchdog.service`
 
-```toml
+```ini
 [Unit]
 Description = git-watchdog
 

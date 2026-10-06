@@ -25,7 +25,7 @@ When no matching process remains, the original `url` and `pushurl` values are re
 - The process is **stateless.** Original remote configuration is saved, masked, inside each repository's own
   `.git/config`:
 
-    ```toml
+    ```ini
     [git-watchdog "origin"]
         key = 29f246bdbad15494a6166a1c3cf8af50
         url = gwd1:4e9b32fdddb820f8c774447f539595375b9d33cd95b024e488710368
