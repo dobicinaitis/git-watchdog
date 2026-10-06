@@ -1,0 +1,131 @@
+name: Create a new release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release at a time; a queued run starts after the current one has pushed its version bump.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # ShellCheck and tests (same jobs as on every push); nothing is released if they fail.
+  # Skipped for the version bump commit pushed by this workflow, so a release never triggers another one.
+  ci:
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: bumped release version') }}"
+    uses: ./.github/workflows/ci.yml
+
+  # Calculates the next version from the conventional commits since the latest tag.
+  # The output is empty when no commit warrants a release (e.g. only docs/chore/ci commits).
+  version:
+    runs-on: ubuntu-latest
+    needs: ci
+    outputs:
+      next: ${{ steps.semver.outputs.next }}
+      next-strict: ${{ steps.semver.outputs.nextStrict }}
+    steps:
+      - name: Calculate next version
+        id: semver
+        uses: ietf-tools/semver-action@v1
+        with:
+          token: ${{ github.token }}
+          branch: ${{ github.sha }} # the commit that passed CI, even if main has moved on since
+          noVersionBumpBehavior: silent
+          noNewCommitBehavior: silent
+
+      - name: Add version to summary
+        env:
+          CURRENT: ${{ steps.semver.outputs.current }}
+          NEXT: ${{ steps.semver.outputs.next }}
+          BUMP: ${{ steps.semver.outputs.bump }}
+        run: |
+          if [ -n "$NEXT" ]; then
+            echo "## :rocket: Releasing $NEXT ($BUMP)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## :zzz: No release" >> "$GITHUB_STEP_SUMMARY"
+            echo "None of the commits since $CURRENT require a new version." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # Bumps the version, tags it and creates a new GitHub release
+  create-github-release:
+    runs-on: ubuntu-latest
+    needs: version
+    if: ${{ needs.version.outputs.next != '' }}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.version.outputs.next }}
+      NEW_VERSION: ${{ needs.version.outputs.next-strict }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Create changelog
+        run: |
+          source .github/scripts/release-functions.sh
+          print_changelog > "$RUNNER_TEMP/CHANGELOG.md"
+          cat "$RUNNER_TEMP/CHANGELOG.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure Git committer identity
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "<>"
+
+      - name: Update release version in build files
+        run: |
+          source .github/scripts/release-functions.sh
+          update_version "$NEW_VERSION"
+          git commit -am "chore: bumped release version to ${NEW_VERSION}"
+          git tag "$TAG"
+          # atomic: if main has moved on, neither the commit nor the tag is pushed
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/CHANGELOG.md"
+
+  # Create and publish a snap package
+  create-snap-release:
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - create-github-release
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.next }} # the tag containing the version bump
+
+      - name: Build snap package
+        id: snapcraft
+        uses: canonical/action-build@v1
+
+      - name: Test snap
+        env:
+          SNAP_FILE: ${{ steps.snapcraft.outputs.snap }}
+          NEW_VERSION: ${{ needs.version.outputs.next-strict }}
+        run: |
+          sudo snap install --dangerous "$SNAP_FILE"
+          git-watchdog version
+          [ "$(git-watchdog version)" = "git-watchdog $NEW_VERSION" ] || exit 1
+          git-watchdog help | grep -q 'git-watchdog' || exit 1
+
+      - name: Publish snap
+        uses: canonical/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
+        with:
+          snap: ${{ steps.snapcraft.outputs.snap }}
+          release: stable
