@@ -51,7 +51,7 @@ Required setup:
 
 ```bash
 snapcraft pack
-sudo snap install --dangerous git-watchdog_0.1.0_amd64.snap
+sudo snap install --dangerous git-watchdog_0.2.0_amd64.snap
 sudo snap connect git-watchdog:system-observe
 git watchdog init gitlab.com
 ```
