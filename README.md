@@ -108,6 +108,11 @@ Without a desktop session, such as over SSH, the daemon starts the first time yo
 
 - The `home` interface covers repositories under `$HOME`, but not repositories inside hidden top-level directories.
 
+- Updates: snapd normally postpones automatic refreshes while one of a snap's apps is running, and the daemon is always
+  running. snapd then notifies you of the pending update and applies it anyway after its deadline (about two weeks).
+  Either way, the running daemon switches to the new revision on its own once the refresh happens. To update right
+  away, run `git watchdog stop`, then `sudo snap refresh git-watchdog`, then `git watchdog`.
+
 ### Tokens
 
 Create a token with repository read-only access. For example:

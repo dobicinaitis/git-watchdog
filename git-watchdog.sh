@@ -34,6 +34,7 @@ fi
 CONFIG_FILE="${GIT_WATCHDOG_CONFIG:-$CONFIG_DIR/config.yaml}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 RUN_DIR="${GIT_WATCHDOG_RUN_DIR:-/tmp}"
+SNAP_ROOT="${GIT_WATCHDOG_SNAP_ROOT:-/snap}" # overridable for tests
 USER_ID="$(id -u)"
 LOG_FILE="$RUN_DIR/git-watchdog-$USER_ID.log"
 LOCK_DIR="$RUN_DIR/git-watchdog-$USER_ID.lock"
@@ -974,6 +975,7 @@ cmd_daemon() {
             last_state="$active"
         fi
         # Updated or removed underneath us: restart with the new version, or quit.
+        snap_follow_refresh
         if [ ! -f "$SELF" ]; then
             log INFO "$SELF was removed; daemon stopped (pid $$)"
             exit 0
@@ -994,6 +996,31 @@ cmd_daemon() {
 # running). The lock's pid file is written when the daemon starts.
 daemon_is_stale() {
     [ "$SELF" -nt "$LOCK_DIR/pid" ]
+}
+
+# After a snap refresh the old revision stays mounted, so $SELF never changes
+# for a running daemon. Follow /snap/<name>/current instead: when it points to
+# a new revision, restart into it with the snap environment moved along.
+snap_follow_refresh() {
+    local name old new_rev new
+    [ -n "${SNAP:-}" ] && [ -n "${SNAP_REVISION:-}" ] || return 0
+    name="${SNAP_INSTANCE_NAME:-${SNAP_NAME:-git-watchdog}}"
+    new_rev="$(readlink "$SNAP_ROOT/$name/current" 2>/dev/null)" || return 0
+    [ -n "$new_rev" ] && [ "$new_rev" != "$SNAP_REVISION" ] || return 0
+    old="$SNAP"
+    new="$SNAP_ROOT/$name/$new_rev"
+    [ -f "$new/bin/git-watchdog" ] || return 0
+    log INFO "snap refreshed from revision $SNAP_REVISION to $new_rev; restarting the daemon"
+    PATH="${PATH//$old/$new}"
+    GIT_EXEC_PATH="${GIT_EXEC_PATH//$old/$new}"
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH//$old/$new}"
+    SNAP_USER_DATA="${SNAP_USER_DATA%/*}/$new_rev"
+    SNAP="$new"
+    SNAP_REVISION="$new_rev"
+    export PATH GIT_EXEC_PATH LD_LIBRARY_PATH SNAP_USER_DATA SNAP SNAP_REVISION
+    release_lock
+    trap - EXIT TERM INT HUP
+    exec "$new/bin/git-watchdog" ${DRY_RUN:+--dry-run} daemon
 }
 
 # stop_daemon PID - terminate the daemon and wait for it to exit.

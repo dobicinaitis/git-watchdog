@@ -266,6 +266,25 @@ EOF
     check "the running daemon is not older than the program" sh -c "! test '$copy' -nt '$pidfile'"
     "$copy" stop >/dev/null
 
+    # --- a snap refresh moves the running daemon to the new revision
+    local snaproot="$T/snaproot" daemon_cmd
+    mkdir -p "$snaproot/gwd/r1/bin" "$snaproot/gwd/r2/bin" "$T/snapcommon"
+    cp "$SCRIPT" "$snaproot/gwd/r1/bin/git-watchdog"
+    cp "$SCRIPT" "$snaproot/gwd/r2/bin/git-watchdog"
+    touch -t 200001010000 "$snaproot/gwd/r1/bin/git-watchdog" "$snaproot/gwd/r2/bin/git-watchdog"
+    ln -s r1 "$snaproot/gwd/current"
+    cp "$CFG" "$T/snapcommon/config.yaml"
+    GIT_WATCHDOG_SNAP_ROOT="$snaproot" SNAP="$snaproot/gwd/r1" SNAP_REVISION=r1 SNAP_INSTANCE_NAME=gwd \
+        SNAP_USER_COMMON="$T/snapcommon" SNAP_USER_DATA="$T/snapdata/r1" \
+        "$snaproot/gwd/r1/bin/git-watchdog" start >/dev/null
+    ln -sfn r2 "$snaproot/gwd/current"
+    sleep 3
+    check "daemon notices the snap refresh" grep -q 'snap refreshed from revision r1 to r2' "$LOG"
+    daemon_cmd="$(ps -p "$(cat "$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock/pid")" -o command= 2>/dev/null)"
+    check "daemon runs the new revision" grep -q "/gwd/r2/bin/git-watchdog daemon" <<<"$daemon_cmd"
+    GIT_WATCHDOG_SNAP_ROOT="$snaproot" SNAP="$snaproot/gwd/r2" SNAP_REVISION=r2 SNAP_INSTANCE_NAME=gwd \
+        SNAP_USER_COMMON="$T/snapcommon" "$snaproot/gwd/r2/bin/git-watchdog" stop >/dev/null
+
     # --- log hygiene
     eq "log is owner-only" "600" "$(stat -c %a "$LOG" 2>/dev/null || stat -f %Lp "$LOG")"
     check "log never contains the token" sh -c "! grep -q '$TOKEN' '$LOG'"
