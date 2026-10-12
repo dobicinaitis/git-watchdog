@@ -1,9 +1,9 @@
 # git-watchdog
 
+![](snap/local/logo.png)
+
 `git-watchdog` switches the remotes of your Git repositories to **read-only mode while selected processes are running**
 (for example, the `claude` CLI or Claude Desktop), then restores them when those processes exit.
-
-![](snap/local/logo.png)
 
 ## How it works
 
@@ -62,8 +62,9 @@ git watchdog init gitlab.com   # asks for the read-only token
 git watchdog                   # shows the status
 ```
 
-The snap needs `system-observe` to see other processes. Until the Snap Store grants it automatically, connect it by
-hand:
+The snap needs `system-observe` to see other processes. Until the Snap Store grants it automatically
+([request](https://forum.snapcraft.io/t/request-to-auto-connect-system-observe-on-git-watchdog-round-2/53542)), 
+connect it by hand:
 
 ```bash
 sudo snap connect git-watchdog:system-observe
