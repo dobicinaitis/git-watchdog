@@ -1,19 +1,19 @@
 # git-watchdog
 
-![](snap/local/logo.png)
-
 AI coding agents run commands with your permissions, including your SSH keys and Git credentials. A single
 unattended `git push` can force-push over shared history, delete a branch or publish unreviewed code, and that is hard
 to undo once it reaches the server.
 
 `git-watchdog` removes push access while an agent is running. As long as a watched process is alive (by default the
-`claude` CLI and Claude Desktop), it puts the remotes of your local repositories in **read-only mode**:
+Claude CLI and Claude Desktop), it puts the remotes of your local repositories in **read-only mode**:
 
 - **Pushing is blocked**, so `git push` fails instead of reaching the server.
 - **Fetching keeps working** through a read-only access token, so the agent doesn't need your SSH key to pull.
 
 When the process exits, the original remotes are restored exactly as they were. It guards against accidental pushes,
 not a determined attacker; see [Security notes](#security-notes).
+
+![](snap/local/logo.png)
 
 ## How it works
 
