@@ -62,57 +62,13 @@ git watchdog init gitlab.com   # asks for the read-only token
 git watchdog                   # shows the status
 ```
 
-The snap needs `system-observe` to see other processes. Until the Snap Store grants it automatically
-([request](https://forum.snapcraft.io/t/request-to-auto-connect-system-observe-on-git-watchdog-round-2/53542)), 
-connect it by hand:
-
-```bash
-sudo snap connect git-watchdog:system-observe
-```
+The snap needs `system-observe` connected by hand for now, and it keeps its config and log in snap-specific
+locations. See [Snap specifics](docs/snap-specifics.md) for that and other snap details.
 
 To install from a Git checkout instead (Linux or macOS), see [Install from source](docs/install-from-source.md).
 
-`init` writes the config and prints the next steps. It's safe to run repeatedly. The token is read from a hidden
-prompt, `$GIT_WATCHDOG_TOKEN`, or stdin, so it does not appear in shell history.
-
-### Bash completion
-
-The snap provides Bash completion for `git-watchdog`. For `git watchdog <TAB>` to work, `init` prints a command to link
-the snap's completion script into the `bash-completion` directory, which the snap is not allowed to write itself.
-
-Run these commands to enable `git` completion:
-
-```bash
-mkdir -p ~/.local/share/bash-completion/completions
-ln -sf ~/snap/git-watchdog/common/git-watchdog.bash ~/.local/share/bash-completion/completions/git-watchdog
-```
-
-### Start at login
-
-The snap starts the daemon when you log in to your desktop using snap's `autostart` support.
-
-`init` also starts the daemon right away, so it runs without logging out and back in.
-
-Without a desktop session, such as over SSH, the daemon starts the first time you run `git watchdog`.
-
-### Snap details
-
-- The snap keeps its configuration in `~/snap/git-watchdog/common/config.yaml` instead of
-  `~/.config/git-watchdog/config.yaml`, because a confined snap cannot access `~/.config` without the super-privileged
-  `personal-files` interface. The folder survives snap updates and is removed together with the snap.
-
-- Snaps have a private `/tmp`, so the snap's log is located at:
-
-  `/tmp/snap-private-tmp/snap.git-watchdog/tmp/git-watchdog-<uid>.log`
-
-  Use `git watchdog logs` to read it.
-
-- The `home` interface covers repositories under `$HOME`, but not repositories inside hidden top-level directories.
-
-- Updates: snapd normally postpones automatic refreshes while one of a snap's apps is running, and the daemon is always
-  running. snapd then notifies you of the pending update and applies it anyway after its deadline (about two weeks).
-  Either way, the running daemon switches to the new revision on its own once the refresh happens. To update right
-  away, run `git watchdog stop`, then `sudo snap refresh git-watchdog`, then `git watchdog`.
+`init` writes the config and prints the next steps. It's safe to run repeatedly. The token can be read from a hidden
+prompt, `$GIT_WATCHDOG_TOKEN`, or stdin.
 
 ### Tokens
 
@@ -168,8 +124,9 @@ git watchdog revert
 
 ## Configuration
 
-The configuration file is `~/snap/git-watchdog/common/config.yaml` for the snap (see [Snap details](#snap-details)),
-or `~/.config/git-watchdog/config.yaml` when [installed from source](docs/install-from-source.md).
+The configuration file is `~/snap/git-watchdog/common/config.yaml` for the snap (see
+[Snap specifics](docs/snap-specifics.md#configuration-and-log)), or `~/.config/git-watchdog/config.yaml` when
+[installed from source](docs/install-from-source.md).
 
 See `config.example.yaml` for an example.
 
@@ -217,27 +174,16 @@ Anchors, multiline strings, and inline maps are not supported.
 
 | Path                                      | Purpose                                                                                          |
 |-------------------------------------------|--------------------------------------------------------------------------------------------------|
-| `~/snap/git-watchdog/common/config.yaml`  | Configuration (mode `600`; contains tokens)                                                      |
+| `~/snap/git-watchdog/common/config.yaml`  | Configuration when installed as a snap                                                           |
 | `~/.config/git-watchdog/config.yaml`      | Configuration when [installed from source](docs/install-from-source.md)                          |
-| `/tmp/git-watchdog-<uid>.log`             | Log (mode `600`; rotated at 1 MiB; tokens are redacted); snap: see [Snap details](#snap-details) |
+| `/tmp/git-watchdog-<uid>.log`             | Log (rotated at 1 MiB); snap: see [Snap specifics](docs/snap-specifics.md#configuration-and-log) |
 | `/tmp/git-watchdog-<uid>.lock/`           | Daemon lock and PID                                                                              |
 | `.git/config` `[git-watchdog "<remote>"]` | Masked original URLs and their key while read-only mode is active                                |
 
 ## Uninstall
 
-```bash
-git watchdog uninstall
-sudo snap remove git-watchdog
-```
-
-`git watchdog uninstall` stops the daemon and restores every remote. If you created the completion link described in
-[Bash completion](#bash-completion), remove it as well:
-
-```bash
-rm ~/.local/share/bash-completion/completions/git-watchdog
-```
-
-For a source install, see [Uninstall](docs/install-from-source.md#uninstall) in the source install guide.
+For the snap, see [Uninstall](docs/snap-specifics.md#uninstall) in the snap notes. For a source install, see
+[Uninstall](docs/install-from-source.md#uninstall) in the source install guide.
 
 ## Security notes
 

@@ -61,4 +61,5 @@ Notes:
 - `system-observe` (needed to see other processes) is not connected automatically for locally built snaps, so the
   `snap connect` command is required.
 
-- See the [README](../README.md#snap-details) for where the snap keeps its config, log and completion script.
+- See [Snap specifics](snap-specifics.md#configuration-and-log) for where the snap keeps its config and log, and
+  [Bash completion](snap-specifics.md#bash-completion) for its completion script.
