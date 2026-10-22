@@ -2,55 +2,73 @@
 
 ![](snap/local/logo.png)
 
-`git-watchdog` switches the remotes of your Git repositories to **read-only mode while selected processes are running**
-(for example, the `claude` CLI or Claude Desktop), then restores them when those processes exit.
+AI coding agents run commands with your permissions, including your SSH keys and Git credentials. A single
+unattended `git push` can force-push over shared history, delete a branch or publish unreviewed code, and that is hard
+to undo once it reaches the server.
+
+`git-watchdog` removes push access while an agent is running. As long as a watched process is alive (by default the
+`claude` CLI and Claude Desktop), it puts the remotes of your local repositories in **read-only mode**:
+
+- **Pushing is blocked**, so `git push` fails instead of reaching the server.
+- **Fetching keeps working** through a read-only access token, so the agent doesn't need your SSH key to pull.
+
+When the process exits, the original remotes are restored exactly as they were. It guards against accidental pushes,
+not a determined attacker; see [Security notes](#security-notes).
 
 ## How it works
 
-While read-only mode is active, each matching remote is modified as follows:
+The daemon watches the process list and switches each matching remote between two states:
 
-- The fetch URL is replaced with an HTTPS URL containing a **read-only token**:
+|                      | Normal                     | Read-only mode                         |
+|----------------------|----------------------------|----------------------------------------|
+| **When**             | no watched process running | a watched process is running           |
+| **Fetch** (`url`)    | your original URL          | HTTPS URL with the read-only token     |
+| **Push** (`pushurl`) | your original setting      | `git-watchdog-read-only://…` (blocked) |
 
-  `git@github.com:group/app.git` → `https://oauth2:<token>@github.com/group/app.git`
+For example, an SSH remote on GitLab becomes:
 
-  This keeps fetching and pulling working without requiring your SSH keys.
+```text
+url      git@gitlab.com:group/app.git  →  https://oauth2:<token>@gitlab.com/group/app.git
+pushurl  (unset)                       →  git-watchdog-read-only://push-disabled-while-read-only-mode-is-active
+```
 
-- Pushing is disabled by setting `pushurl` to `git-watchdog-read-only://…`. \
-  As a result, `git push` fails with: `unable to find remote helper for 'git-watchdog-read-only'`
+Fetching and pulling keep working without your SSH keys, while `git push` fails with:
 
-When no matching process remains, the original `url` and `pushurl` values are restored exactly as they were.
+```text
+fatal: unable to find remote helper for 'git-watchdog-read-only'
+```
+
+When the last watched process exits, `url` and `pushurl` are restored exactly as they were.
 
 ### Details
 
-- The process is **stateless.** Original remote configuration is saved, masked, inside each repository's own
-  `.git/config`:
+#### State lives in Git
 
-    ```ini
-    [git-watchdog "origin"]
-        key = 29f246bdbad15494a6166a1c3cf8af50
-        url = gwd1:4e9b32fdddb820f8c774447f539595375b9d33cd95b024e488710368
-    ```
+There is no separate state file. The original values are saved, masked, in each repository's own `.git/config`:
 
-  A remote is considered to be in read-only mode when its saved `url` exists. This means the current state can always be
-  derived from Git itself. If the daemon crashes or restarts, it simply converges back to the correct state.
+```ini
+[git-watchdog "origin"]
+    key = 29f246bdbad15494a6166a1c3cf8af50
+    url = gwd1:4e9b32fdddb820f8c774447f539595375b9d33cd95b024e488710368
+```
 
-- **Masked originals.** Saved `url` and `pushurl` values are XOR-ed with a random per-remote `key` (16 bytes from
-  `/dev/urandom`) and hex encoded. This prevents the original remote from being directly readable from `.git/config`,
-  for example by an agent inspecting `git config --list`. The key is stored alongside the value, so this is
-  **obfuscation, not strong encryption**.
+A remote is in read-only mode exactly when this saved `url` exists, so the state can always be read from Git itself.
+If the daemon crashes or restarts, it simply converges back to the correct state.
 
-- The daemon checks the process list every `check-interval` seconds. It rescans repositories under `source-directories`
-  whenever read-only mode switches on or off, and every `rescan-interval` seconds to detect new clones and configuration
-  changes.
+> [!NOTE]
+> **Masked, not encrypted.** Saved values are XOR-ed with a random per-remote `key` (16 bytes from `/dev/urandom`)
+> and hex encoded, so an agent running `git config --list` doesn't see the original remote. The key is stored next to
+> the value, so this is obfuscation, not strong encryption.
 
-- Processes are matched by exact process name (`pgrep -x`). A matcher can also be an extended regular expression such as
-  `claude.*`.
+#### Runtime behavior
 
-- Hidden directories and `node_modules` are skipped when searching for repositories.
-
-- A daemon never keeps running an outdated version. When the program is updated (`git pull`, snap refresh or
-  reinstall), the daemon restarts itself, and `git watchdog` replaces a daemon that started before the current program
-  was installed.
+| What               | How                                                                             |
+|--------------------|---------------------------------------------------------------------------------|
+| Process checks     | Every `check-interval` seconds (default 5)                                      |
+| Repository rescans | When read-only mode switches, and every `rescan-interval` seconds (default 300) |
+| Process matching   | Exact name (`pgrep -x`), or an extended regular expression such as `claude.*`   |
+| Repository search  | Under `source-directories`, skipping hidden directories and `node_modules`      |
+| Updates            | The daemon restarts itself after `git pull`, a snap refresh or a reinstall      |
 
 ## Install
 
