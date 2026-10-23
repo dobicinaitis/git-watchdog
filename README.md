@@ -80,8 +80,8 @@ git watchdog init gitlab.com   # asks for the read-only token
 git watchdog                   # shows the status
 ```
 
-The snap needs `system-observe` connected by hand for now, and it keeps its config and log in snap-specific
-locations. See [Snap specifics](docs/snap-specifics.md) for that and other snap details.
+The snap keeps its config and log in snap-specific locations. See [Snap specifics](docs/snap-specifics.md) for that
+and other snap details.
 
 To install from a Git checkout instead (Linux or macOS), see [Install from source](docs/install-from-source.md).
 

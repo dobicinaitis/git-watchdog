@@ -3,16 +3,6 @@
 These notes apply to the snap installed from the Snap Store. For the install steps, see
 the [README](../README.md#install). For a Git checkout, see [Install from source](install-from-source.md).
 
-## Connect `system-observe`
-
-The snap needs `system-observe` to see other processes. Until the Snap Store grants it automatically
-([request](https://forum.snapcraft.io/t/request-to-auto-connect-system-observe-on-git-watchdog-round-2/53542)),
-connect it by hand:
-
-```bash
-sudo snap connect git-watchdog:system-observe
-```
-
 ## Bash completion
 
 The snap provides Bash completion for `git-watchdog`. For `git watchdog <TAB>` to work, `init` prints a command to link
