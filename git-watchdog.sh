@@ -1197,12 +1197,16 @@ __git_watchdog_words() {
 
 # Called by git's own completion for "git watchdog ...".
 _git_watchdog() {
-    local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}" words
+    # Git turns "git watchdog --help" into "git help watchdog" (a man page),
+    # so only offer --help for "git-watchdog"; "git watchdog help" works.
+    words="$(__git_watchdog_words "$prev")"
+    words="${words/ --help/}"
     if declare -F __gitcomp >/dev/null 2>&1; then
-        __gitcomp "$(__git_watchdog_words "$prev")"
+        __gitcomp "$words"
     else
         # shellcheck disable=SC2207 # mapfile is not available in bash 3.2
-        COMPREPLY=($(compgen -W "$(__git_watchdog_words "$prev")" -- "$cur"))
+        COMPREPLY=($(compgen -W "$words" -- "$cur"))
     fi
 }
 
