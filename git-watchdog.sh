@@ -37,6 +37,11 @@ RUN_DIR="${GIT_WATCHDOG_RUN_DIR:-/tmp}"
 SNAP_ROOT="${GIT_WATCHDOG_SNAP_ROOT:-/snap}" # overridable for tests
 USER_ID="$(id -u)"
 LOG_FILE="$RUN_DIR/git-watchdog-$USER_ID.log"
+LOG_FILE_SHOWN="$LOG_FILE" # where the user finds the log outside the snap
+if [ -n "${SNAP:-}" ] && [ "$RUN_DIR" = /tmp ]; then
+    # A snap has a private /tmp, which the host sees under /tmp/snap-private-tmp.
+    LOG_FILE_SHOWN="/tmp/snap-private-tmp/snap.${SNAP_INSTANCE_NAME:-${SNAP_NAME:-git-watchdog}}$LOG_FILE"
+fi
 LOCK_DIR="$RUN_DIR/git-watchdog-$USER_ID.lock"
 COMPLETION_DIR="$REAL_HOME/.local/share/bash-completion/completions"
 BIN_DIR="$REAL_HOME/.local/bin"
@@ -103,7 +108,7 @@ ensure_log_file() {
     [ -n "$LOG_DISABLED" ] && return 1
     if [ -L "$LOG_FILE" ] || { [ -e "$LOG_FILE" ] && [ ! -O "$LOG_FILE" ]; }; then
         LOG_DISABLED=1
-        printf 'git-watchdog: refusing to use log file %s (symlink or not owned by you)\n' "$LOG_FILE" >&2
+        printf 'git-watchdog: refusing to use log file %s (symlink or not owned by you)\n' "$LOG_FILE_SHOWN" >&2
         return 1
     fi
     if [ ! -e "$LOG_FILE" ]; then
@@ -1061,7 +1066,7 @@ cmd_start() {
         report ok "Daemon" "already running (pid $pid)"
         return 0
     fi
-    pid="$(start_daemon)" || die "failed to start the daemon, see $LOG_FILE"
+    pid="$(start_daemon)" || die "failed to start the daemon, $(log_hint)"
     report ok "Daemon" "started (pid $pid)"
 }
 
@@ -1114,11 +1119,11 @@ EOF
     elif [ -n "$DRY_RUN" ]; then
         report dry "Daemon" "not running" "(not started in dry-run mode)"
     else
-        report error "Daemon" "failed to start, see $(tilde "$LOG_FILE")"
+        report error "Daemon" "failed to start, $(log_hint)"
         add_step "See why the daemon did not start:" "git watchdog logs"
     fi
     report ok "Config" "$(tilde "$CONFIG_FILE")"
-    report ok "Log" "$(tilde "$LOG_FILE")"
+    report ok "Log" "$(log_location)"
 
     if [ -n "$VERBOSE" ]; then
         masked="$(list_masked)"
@@ -1223,6 +1228,33 @@ cmd_hosts() {
             parse_url "$url" && printf '%s\n' "$URL_HOST"
         done
     } | sort -u
+}
+
+# shown_path PATH - PATH as seen from outside the snap (for the log files).
+shown_path() {
+    case "$1" in
+        "$LOG_FILE"*) printf '%s%s' "$LOG_FILE_SHOWN" "${1#"$LOG_FILE"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# log_location - the log path, or under snap (where reading it needs sudo)
+# how to view it instead.
+log_location() {
+    if [ "$LOG_FILE_SHOWN" != "$LOG_FILE" ]; then
+        printf 'use %sgit watchdog logs%s to view the log' "$C_DIM" "$C_RESET"
+    else
+        tilde "$LOG_FILE"
+    fi
+}
+
+# log_hint - "see <log>", for error messages.
+log_hint() {
+    if [ "$LOG_FILE_SHOWN" != "$LOG_FILE" ]; then
+        log_location
+    else
+        printf 'see %s' "$(tilde "$LOG_FILE")"
+    fi
 }
 
 # Show a path under the home directory as ~/...
@@ -1411,7 +1443,7 @@ cmd_init() {
         elif pid="$(start_daemon)"; then
             report ok "Daemon" "running (pid $pid)"
         else
-            report error "Daemon" "could not start, see $(tilde "$LOG_FILE")"
+            report error "Daemon" "could not start, $(log_hint)"
         fi
     fi
 
@@ -1495,11 +1527,11 @@ cmd_uninstall() {
             continue
         fi
         if [ -n "$DRY_RUN" ]; then
-            report dry "$label" "would remove $(tilde "$file")"
+            report dry "$label" "would remove $(tilde "$(shown_path "$file")")"
         elif rm -f "$file"; then
-            report ok "$label" "removed $(tilde "$file")"
+            report ok "$label" "removed $(tilde "$(shown_path "$file")")"
         else
-            report error "$label" "could not remove $(tilde "$file")"
+            report error "$label" "could not remove $(tilde "$(shown_path "$file")")"
         fi
     done
     if [ -d "$LOCK_DIR" ] && [ -O "$LOCK_DIR" ] && ! daemon_pid >/dev/null; then
@@ -1531,7 +1563,10 @@ cmd_uninstall() {
 }
 
 cmd_logs() {
-    [ -f "$LOG_FILE" ] || die "no log file at $LOG_FILE yet"
+    if [ ! -f "$LOG_FILE" ]; then
+        [ "$LOG_FILE_SHOWN" != "$LOG_FILE" ] && die "no log file yet"
+        die "no log file at $LOG_FILE yet"
+    fi
     if [ "$1" = "-f" ]; then
         tail -n 50 -f "$LOG_FILE"
     else
@@ -1573,7 +1608,7 @@ Options:
 
 Files:
   config  $CONFIG_FILE
-  log     $LOG_FILE
+  log     $(log_location)
 EOF
 }
 
