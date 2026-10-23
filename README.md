@@ -83,7 +83,7 @@ git watchdog                   # shows the status
 The snap keeps its config and log in snap-specific locations. See [Snap specifics](docs/snap-specifics.md) for that
 and other snap details.
 
-To install from a Git checkout instead (Linux or macOS), see [Install from source](docs/install-from-source.md).
+To install from a Git checkout instead (Linux), see [Install from source](docs/install-from-source.md).
 
 `init` writes the config and prints the next steps. It's safe to run repeatedly. The token can be read from a hidden
 prompt, `$GIT_WATCHDOG_TOKEN`, or stdin.
@@ -107,7 +107,7 @@ git watchdog [--dry-run] [command]
   init [host]     Create the config, install completion and the git command;
                   with a host, save its read-only token.
   start | stop | restart
-  daemon          Run in the foreground (for systemd, launchd, snap).
+  daemon          Run in the foreground (for systemd, snap).
   sync            Apply the wanted state once and exit.
   revert          Restore all original remotes now.
   check           Show which required tools are installed (every other

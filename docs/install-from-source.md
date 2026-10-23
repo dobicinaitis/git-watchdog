@@ -1,7 +1,12 @@
-# Install from source (Linux and macOS)
+# Install from source (Linux)
 
 These steps install `git-watchdog` from a Git checkout instead of the snap. For the snap, see the
 [README](../README.md#install).
+
+> [!NOTE]
+> These steps are tested on Linux. The script avoids GNU-only tool flags and its test suite also runs on macOS in CI,
+> but a full macOS setup (process names, shell completion, starting at login) hasn't been verified. If you use macOS
+> and want to help, contributions are welcome.
 
 Requirements: `bash` (3.2+), `git`, `pgrep`/`ps`, and standard POSIX tools such as `awk` and `od`.
 
@@ -48,10 +53,10 @@ See [Tokens](../README.md#tokens) for what kind of token to create.
 
 ## Start at login
 
-Without the snap, the daemon is started by `git watchdog` on first use. To start it at login, register it with the
-service manager of your system.
+Without the snap, the daemon is started by `git watchdog` on first use. To start it at login, register it as a systemd
+user service.
 
-### systemd user service (Linux)
+### systemd user service
 
 Create:
 
@@ -75,53 +80,6 @@ Then enable and start the service:
 systemctl --user enable --now git-watchdog
 ```
 
-### launchd (macOS)
-
-Create:
-
-`~/Library/LaunchAgents/dev.git-watchdog.plist`
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-    <dict>
-        <key>Label</key>
-        <string>dev.git-watchdog</string>
-        <key>ProgramArguments</key>
-        <array>
-            <string>/Users/YOU/.local/bin/git-watchdog</string>
-            <string>daemon</string>
-        </array>
-        <key>EnvironmentVariables</key>
-        <dict>
-            <key>PATH</key>
-            <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        </dict>
-        <key>RunAtLoad</key>
-        <true/>
-        <key>KeepAlive</key>
-        <true/>
-    </dict>
-</plist>
-```
-
-Then load it:
-
-```bash
-launchctl load ~/Library/LaunchAgents/dev.git-watchdog.plist
-```
-
-## macOS notes
-
-The script uses only Bash 3.2 features and BSD-compatible tool flags, so it runs with the stock `/bin/bash`.
-
-On macOS, `pgrep -x` matches the process name as reported by:
-
-```bash
-ps -o comm
-```
-
 ## Uninstall
 
 ```bash
@@ -143,4 +101,4 @@ tokens.
 
 With `--dry-run`, the command only reports what it would do.
 
-If you set up a systemd service or launchd agent, disable and remove it as well, then delete the checkout.
+If you set up a systemd service, disable and remove it as well, then delete the checkout.
