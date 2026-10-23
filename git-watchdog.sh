@@ -16,7 +16,7 @@
 #
 # Works with bash 3.2+ (macOS) and GNU or BSD userlands.
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 set -o pipefail
 
 # --------------------------------------------------------------------------- paths
