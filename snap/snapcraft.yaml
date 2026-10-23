@@ -41,8 +41,8 @@ apps:
     environment:
       GIT_EXEC_PATH: $SNAP/usr/lib/git-core
     plugs:
-      - home                    # Git repositories under $HOME
-      - system-observe          # see other processes (pgrep/ps)
+      - home           # Git repositories under $HOME
+      - system-observe # see other processes (pgrep/ps)
 
   # Started at desktop login through the autostart file that "git watchdog init"
   # writes to $SNAP_USER_DATA/.config/autostart (user daemons are still experimental in snapd).
