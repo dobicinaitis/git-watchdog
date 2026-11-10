@@ -415,8 +415,16 @@ EOF
     check "test environment does not touch the other repositories" test -z "$(git -C "$HOME/src/app" config --get-regexp '^git-watchdog\.')"
     rm -rf "$te"
 
-    # --- uninstall (keeps the config by default)
+    # --- the daemon refreshes an outdated completion file (e.g. after a snap refresh)
+    gwd stop >/dev/null
+    rm -f "$completion"
+    printf '# Installed by "git watchdog init".\ncomplete -W "status" git-watchdog\n' >"$completion"
     gwd start >/dev/null
+    sleep 1
+    check "the daemon refreshes an outdated completion" grep -q snooze "$completion"
+    check "the daemon logs the completion refresh" grep -q 'updated the bash completion' "$LOG"
+
+    # --- uninstall (keeps the config by default)
     start_fake
     sleep 3
     out="$(gwd --dry-run uninstall)"

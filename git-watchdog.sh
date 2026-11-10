@@ -991,6 +991,7 @@ cmd_daemon() {
     trap 'release_lock' EXIT
     rotate_log
     log INFO "daemon started (pid $$, version $VERSION${DRY_RUN:+, dry-run})"
+    [ -z "$DRY_RUN" ] && refresh_completion
     load_config || log WARN "no config at $CONFIG_FILE; run 'git watchdog init'"
 
     while :; do
@@ -1661,6 +1662,22 @@ tilde() {
         "$REAL_HOME"/*) printf '%s/%s' "~" "${1#"$REAL_HOME"/}" ;;
         *) printf '%s' "$1" ;;
     esac
+}
+
+# Keeps the completion file that init wrote in step with this version, so an
+# upgrade (e.g. a snap refresh) brings new commands to <TAB>. Leaves links and
+# files that init did not write alone.
+refresh_completion() {
+    local file="$COMPLETION_DIR/git-watchdog" content
+    [ -n "${SNAP:-}" ] && file="${SNAP_USER_COMMON:-$REAL_HOME/snap/git-watchdog/common}/git-watchdog.bash"
+    [ -f "$file" ] && [ ! -L "$file" ] && grep -q 'Installed by "git watchdog init"' "$file" 2>/dev/null || return 0
+    content="$(completion_script)"
+    [ "$(cat "$file")" = "$content" ] && return 0
+    if install_file "$content" "$file" 644; then
+        log INFO "updated the bash completion in $file"
+    else
+        log WARN "could not update the bash completion in $file"
+    fi
 }
 
 install_file() { # install_file <content> <path> <mode>
