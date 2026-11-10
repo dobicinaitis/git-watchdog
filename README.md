@@ -101,23 +101,27 @@ Create a token with repository read-only access. For example:
 ```
 git watchdog [--dry-run] [command]
 
-  status [-v]     Start the daemon if needed and show whether read-only mode is
-                  active and which process (name and pid) caused it. Default.
-                  -v also lists the remotes currently in read-only mode.
-  init [host]     Create the config, install completion and the git command;
-                  with a host, save its read-only token.
+  status [-v]      Start the daemon if needed and show whether read-only mode is
+                   active and which process (name and pid) caused it. Default.
+                   -v also lists the remotes currently in read-only mode.
+  init [host]      Create the config, install completion and the git command;
+                   with a host, save its read-only token.
   start | stop | restart
-  daemon          Run in the foreground (for systemd, snap).
-  sync            Apply the wanted state once and exit.
-  revert          Restore all original remotes now.
-  check           Show which required tools are installed (every other
-                  command checks this on its own and stops if one is missing).
+  daemon           Run in the foreground (for systemd, snap).
+  sync             Apply the wanted state once and exit.
+  revert           Restore all original remotes now.
+  snooze [seconds]
+                   Allow pushing from the current repository for a while
+                   (default 60) after you confirm it in a desktop dialog;
+                   read-only mode is re-applied after the first push.
+  check            Show which required tools are installed (every other
+                   command checks this on its own and stops if one is missing).
   uninstall [--remove-config]
-                  Stop the daemon, restore all remotes and remove what init
-                  installed; the config is kept unless --remove-config.
-  logs [-f]       Show or follow the log.
-  --dry-run       Report what would change without modifying anything.
-                  `git watchdog --dry-run` alone runs a dry-run sync.
+                   Stop the daemon, restore all remotes and remove what init
+                   installed; the config is kept unless --remove-config.
+  logs [-f]        Show or follow the log.
+  --dry-run        Report what would change without modifying anything.
+                   `git watchdog --dry-run` alone runs a dry-run sync.
 ```
 
 Example:
@@ -132,6 +136,9 @@ git-watchdog status
   ✓ Config       ~/.config/git-watchdog/config.yaml
   ✓ Log          /tmp/git-watchdog-1000.log
 ```
+
+Use `git watchdog snooze` when you want to push without terminating the monitored process. git-watchdog will ask for
+confirmation using a desktop dialog prompt and re-apply read-only mode after you push.
 
 Stopping the daemon leaves repositories in their current state. If matching processes are still running, those
 repositories remain read-only until the daemon is started again or you run:
@@ -213,6 +220,10 @@ For the snap, see [Uninstall](docs/snap-specifics.md#uninstall) in the snap note
   typically readable by other local users, so use a token with read-only permissions only.
 
 - Tokens are never written to the log or displayed by `status`.
+
+- `git watchdog snooze` restores the original remotes of one repository for a while. During that time the monitored
+  process can push from that repository too. The confirmation dialog stops processes that only run terminal commands,
+  not one that can control your desktop (for example with `xdotool` or computer use) and click **Allow** itself.
 
 ## Development
 

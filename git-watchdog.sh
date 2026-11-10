@@ -224,6 +224,11 @@ cmd_check() {
         fi
     done
     missing="$(missing_tools)"
+    if t="$(dialog_tool)"; then
+        report ok "Dialog" "$t" "(for git watchdog snooze)"
+    else
+        report warn "Dialog" "none available" "(snooze needs zenity, kdialog or xmessage in a desktop session, or macOS)"
+    fi
     [ -n "$missing" ] && add_step "Install the missing tools with your package manager:" "$missing"
     print_steps
     [ -z "$missing" ]
@@ -591,7 +596,7 @@ repositories() {
 # ("key value" lines), read once per repository.
 
 read_repo_config() {
-    REPO_CFG="$(git -C "$1" config --local --get-regexp "^(remote|$STATE_SECTION)\\..*\\.(url|pushurl|key)\$" 2>/dev/null)" || REPO_CFG=""
+    REPO_CFG="$(git -C "$1" config --local --get-regexp "^((remote|$STATE_SECTION)\\..*\\.(url|pushurl|key)|$STATE_SECTION\\.snooze-until)\$" 2>/dev/null)" || REPO_CFG=""
 }
 
 # cfg_get VAR KEY - all values of KEY in REPO_CFG, newline separated, into VAR.
@@ -614,6 +619,19 @@ cfg_remote_names() {
         k="${k%% *}"
         case "$k" in
             remote.*.url) name="${k#remote.}"; printf '%s\n' "${name%.url}" ;;
+            "$STATE_SECTION".*.url) name="${k#"$STATE_SECTION".}"; printf '%s\n' "${name%.url}" ;;
+        esac
+    done <<EOF
+$REPO_CFG
+EOF
+}
+
+# Names of the remotes in read-only mode (those with a saved original URL).
+cfg_masked_names() {
+    local k name
+    while IFS= read -r k; do
+        k="${k%% *}"
+        case "$k" in
             "$STATE_SECTION".*.url) name="${k#"$STATE_SECTION".}"; printf '%s\n' "${name%.url}" ;;
         esac
     done <<EOF
@@ -840,9 +858,24 @@ reconcile_remote() {
 
 # reconcile_repository REPO ACTIVE(1|"")
 reconcile_repository() {
-    local repo="$1" active="$2" names name
+    local repo="$1" active="$2" names name snooze now
     read_repo_config "$repo"
     [ -n "$REPO_CFG" ] || return 0
+
+    # A snoozed repository keeps its original remotes until the snooze ends.
+    cfg_get snooze "$SNOOZE_KEY"
+    if [ -n "$snooze" ]; then
+        now="$(date +%s)"
+        case "$snooze" in *[!0-9]*) snooze=0 ;; esac
+        if [ -n "$active" ] && [ "$snooze" -gt "$now" ]; then
+            log DEBUG "$repo: snoozed for $((snooze - now))s more"
+            if [ -z "$SNOOZE_NEXT" ] || [ "$snooze" -lt "$SNOOZE_NEXT" ]; then SNOOZE_NEXT="$snooze"; fi
+            active=""
+        else
+            announce "$repo" "end the snooze"
+            git_unset_all "$repo" "$SNOOZE_KEY"
+        fi
+    fi
     names="$(cfg_remote_names | sort -u)"
 
     adopt_renamed_remote "$repo" "$names"
@@ -863,7 +896,7 @@ EOF
 # reconcile ACTIVE(1|"") - bring every repository to the wanted state.
 reconcile() {
     local active="$1" repo count=0
-    CHANGES=0 ERRORS=0
+    CHANGES=0 ERRORS=0 SNOOZE_NEXT=""
     while IFS= read -r repo; do
         [ -n "$repo" ] || continue
         reconcile_repository "$repo" "$active"
@@ -972,7 +1005,8 @@ cmd_daemon() {
                 log INFO "read-only mode INACTIVE, no matching processes running"
             fi
         fi
-        if [ "$active" != "$last_state" ] || [ $((now - last_scan)) -ge "$CFG_RESCAN_INTERVAL" ]; then
+        if [ "$active" != "$last_state" ] || [ $((now - last_scan)) -ge "$CFG_RESCAN_INTERVAL" ] ||
+            { [ -n "$SNOOZE_NEXT" ] && [ "$now" -ge "$SNOOZE_NEXT" ]; }; then
             rotate_log
             load_config >/dev/null 2>&1
             reconcile "$active"
@@ -1176,6 +1210,365 @@ cmd_revert() {
     report_reconcile
 }
 
+# ------------------------------------------------------------------------ snooze
+# "git watchdog snooze [seconds]" allows pushing from the current repository
+# for a while, without stopping the watched process. The user confirms it in a
+# desktop dialog, which an agent running commands in a terminal cannot answer;
+# on purpose there is no option to skip it. The snooze is kept in the
+# repository's own config (git-watchdog.snooze-until, a Unix time), so the
+# daemon leaves the repository alone until then. A watcher left running in the
+# background on the user's terminal re-applies read-only mode as soon as it
+# sees a push (an "update by push" reflog entry of a remote-tracking branch),
+# or when the time runs out, and says so in that terminal.
+
+SNOOZE_DEFAULT=60
+SNOOZE_MAX=3600
+DIALOG_TIMEOUT=30
+SNOOZE_KEY="$STATE_SECTION.snooze-until"
+SNOOZE_NEXT="" # earliest end of a snooze seen by the last reconcile (daemon)
+
+has_display() { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }
+
+# dialog_tool - print the dialog program to ask for confirmation with.
+dialog_tool() {
+    if has_display; then
+        if have zenity; then printf 'zenity'; return 0; fi
+        if have kdialog; then printf 'kdialog'; return 0; fi
+    fi
+    # xmessage is plain X11 (XWayland on Wayland), a last resort on the host.
+    if [ -n "${DISPLAY:-}" ] && have xmessage; then printf 'xmessage'; return 0; fi
+    if [ "$(uname -s 2>/dev/null)" = Darwin ] && have osascript; then
+        printf 'osascript'
+        return 0
+    fi
+    return 1
+}
+
+# run_dialog COMMAND... - run a dialog program. In the snap, zenity needs the
+# command chain the gnome extension gives its own apps: the GPU wrapper (which
+# also provides libraries such as libX11), then the desktop launcher. The CLI
+# app does not run through it, so it is used here, for the dialog only.
+run_dialog() {
+    local launcher wrapper
+    launcher="${SNAP:-}/snap/command-chain/desktop-launch"
+    if [ -n "${SNAP:-}" ] && [ -x "$launcher" ]; then
+        set -- "$launcher" "$@"
+        for wrapper in "$SNAP"/snap/command-chain/gpu-*-wrapper; do
+            [ -x "$wrapper" ] && set -- "$wrapper" "$@"
+        done
+        # The launcher keeps an inherited value, e.g. from a terminal that is
+        # itself a snap, and would then use (and fail to rewrite) that snap's cache.
+        local GDK_PIXBUF_MODULE_FILE="${SNAP_USER_COMMON:-$REAL_HOME/snap/git-watchdog/common}/.cache/gdk-pixbuf-loaders.cache"
+        export GDK_PIXBUF_MODULE_FILE
+    fi
+    "$@"
+}
+
+# confirm_dialog TOOL TEXT - ask the user; returns 0 when they chose "Allow",
+# 1 for Cancel (the default button) or no answer within DIALOG_TIMEOUT, and 2
+# when the dialog could not be shown, with its error output in DIALOG_ERROR.
+DIALOG_ERROR=""
+confirm_dialog() {
+    local tool="$1" text="$2" err rc
+    DIALOG_ERROR=""
+    case "$tool" in
+        zenity)
+            err="$(run_dialog zenity --question --title=git-watchdog --no-markup --text="$text" \
+                --ok-label=Allow --cancel-label=Cancel --default-cancel \
+                --timeout="$DIALOG_TIMEOUT" 2>&1 >/dev/null)"
+            rc=$?
+            case "$rc" in 0) return 0 ;; 1 | 5) return 1 ;; esac # 5: timeout
+            ;;
+        kdialog)
+            # kdialog has no timeout of its own.
+            set -- kdialog --title git-watchdog --warningyesno "$text" --yes-label Allow --no-label Cancel
+            have timeout && set -- timeout "$DIALOG_TIMEOUT" "$@"
+            err="$("$@" 2>&1 >/dev/null)"
+            rc=$?
+            case "$rc" in 0) return 0 ;; 1 | 124) return 1 ;; esac # 124: timeout
+            ;;
+        xmessage)
+            # Buttons exit with 101/102; a timeout exits with 0, an error with 1.
+            err="$(xmessage -title git-watchdog -center -buttons Cancel:102,Allow:101 \
+                -default Cancel -timeout "$DIALOG_TIMEOUT" "$text" 2>&1 >/dev/null)"
+            rc=$?
+            case "$rc" in 101) return 0 ;; 0 | 102) return 1 ;; esac
+            ;;
+        osascript)
+            # The text is passed as an argument, never as AppleScript source.
+            err="$(osascript -e 'on run argv' \
+                -e 'display dialog (item 1 of argv) with title "git-watchdog" buttons {"Cancel", "Allow"} default button "Cancel" cancel button "Cancel" with icon caution giving up after ((item 2 of argv) as integer)' \
+                -e 'end run' "$text" "$DIALOG_TIMEOUT" 2>&1)"
+            rc=$?
+            case "$rc:$err" in
+                0:*"button returned:Allow"*"gave up:false"*) return 0 ;;
+                0:* | *"(-128)"*) return 1 ;; # gave up, or Cancel ("User canceled")
+            esac
+            ;;
+        *) err="unknown dialog program" rc=2 ;;
+    esac
+    DIALOG_ERROR="$tool exited with status $rc${err:+: $err}"
+    return 2
+}
+
+# Remote-tracking branches and their commits: "ref objectname" lines.
+tracking_refs() {
+    git -C "$1" for-each-ref --format='%(refname) %(objectname)' refs/remotes 2>/dev/null
+}
+
+# pushed_ref REPO BEFORE - print a remote-tracking branch that a push changed
+# since BEFORE (a tracking_refs snapshot), e.g. "origin/main".
+pushed_ref() {
+    local ref obj
+    while IFS=' ' read -r ref obj; do
+        [ -n "$ref" ] || continue
+        case "$NL$2$NL" in *"$NL$ref $obj$NL"*) continue ;; esac
+        if [ "$(git -C "$1" reflog show -n 1 --format=%gs "$ref" -- 2>/dev/null)" = "update by push" ]; then
+            printf '%s' "${ref#refs/remotes/}"
+            return 0
+        fi
+    done <<EOF
+$(tracking_refs "$1")
+EOF
+    return 1
+}
+
+# snooze_end REPO MESSAGE [REF] - drop the snooze and re-apply read-only mode
+# (when a watched process still runs), then tell the user on stderr. "@REF@"
+# in MESSAGE stands for REF, which is highlighted like the repository.
+snooze_end() {
+    local repo="$1" msg="$2" shown="$2" where b="" h="" r="" active=""
+    if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        b=$'\033[1m' h=$'\033[36m' r=$'\033[0m'
+    fi
+    msg="${msg//@REF@/${3:-}}"
+    shown="${shown//@REF@/$h${3:-}$r}"
+    where="$h$(tilde "$repo")$r"
+    git_unset_all "$repo" "$SNOOZE_KEY"
+    [ -n "$(matching_processes)" ] && active=1
+    ERRORS=0
+    reconcile_repository "$repo" "$active"
+    if [ "$ERRORS" -gt 0 ]; then
+        log ERROR "$repo: could not re-apply read-only mode after the snooze"
+        printf '\n%sgit-watchdog:%s %s, but read-only mode could not be re-applied to %s; run "git watchdog sync"\n' "$b" "$r" "$shown" "$where" >&2
+    elif [ -n "$active" ]; then
+        log INFO "$repo: $msg, read-only mode re-applied"
+        printf '\n%sgit-watchdog:%s %s, read-only mode re-applied to %s\n' "$b" "$r" "$shown" "$where" >&2
+    else
+        log INFO "$repo: $msg, no watched process running"
+        printf '\n%sgit-watchdog:%s %s in %s (no watched process is running)\n' "$b" "$r" "$shown" "$where" >&2
+    fi
+}
+
+# snooze_watch REPO UNTIL BEFORE SECONDS - wait for a push or the end of the snooze.
+snooze_watch() {
+    local repo="$1" until="$2" before="$3" ref current
+    # Keep going when the terminal closes; a TERM still re-applies read-only mode.
+    trap '' HUP INT
+    trap 'snooze_end "$repo" "snooze stopped"; exit 0' TERM
+    while [ "$(date +%s)" -lt "$until" ]; do
+        sleep 1
+        current="$(git -C "$repo" config --local --get "$SNOOZE_KEY" 2>/dev/null)"
+        [ "$current" = "$until" ] || exit 0 # ended or replaced by another snooze
+        if ref="$(pushed_ref "$repo" "$before")"; then
+            snooze_end "$repo" "push to @REF@ detected" "$ref"
+            exit 0
+        fi
+    done
+    snooze_end "$repo" "snooze of ${4}s ended without a push"
+}
+
+cmd_snooze() {
+    local secs="${1:-$SNOOZE_DEFAULT}" repo names name tool text start until count
+    case "$secs" in '' | *[!0-9]*) die "snooze: expected a number of seconds, got '$secs'" ;; esac
+    if [ "$secs" -lt 1 ] || [ "$secs" -gt "$SNOOZE_MAX" ]; then
+        die "snooze: the duration must be between 1 and $SNOOZE_MAX seconds"
+    fi
+    repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "snooze: not inside a Git working tree"
+    load_config || die "no config at $CONFIG_FILE; run 'git watchdog init' first"
+    ui_header snooze
+
+    read_repo_config "$repo"
+    names="$(cfg_masked_names | sort -u)"
+    if [ -z "$names" ]; then
+        report ok "Read-only" "inactive for $(tilde "$repo")" "(pushing works as usual)"
+        return 0
+    fi
+    count="$(printf '%s\n' "$names" | wc -l | tr -d ' ')"
+    if [ -n "$DRY_RUN" ]; then
+        report dry "Snooze" "would ask for confirmation, then allow pushing from $(tilde "$repo") for ${secs}s"
+        report_more "($count remote(s) restored until the first push or the end of the snooze)"
+        return 0
+    fi
+
+    tool="$(dialog_tool)" || {
+        report error "Snooze" "refused: no desktop dialog to confirm it"
+        report_more "needs zenity, kdialog or xmessage in a graphical session, or osascript on macOS"
+        return 1
+    }
+    text="Allow git push for $secs seconds?"
+    report warn "Confirm" "answer the desktop dialog" "(cancels in ${DIALOG_TIMEOUT}s)"
+    confirm_dialog "$tool" "$text"
+    case $? in
+        0) ;;
+        1)
+            log INFO "$repo: snooze not confirmed"
+            report error "Snooze" "cancelled" "(read-only mode stays active)"
+            return 1
+            ;;
+        *)
+            log ERROR "$repo: the snooze dialog could not be shown: $DIALOG_ERROR"
+            report error "Snooze" "the $tool dialog could not be shown" "(read-only mode stays active)"
+            printf '%s\n' "$DIALOG_ERROR" | grep -v '^[[:space:]]*$' | tail -n 3 | while IFS= read -r line; do
+                report_more "$line"
+            done
+            return 1
+            ;;
+    esac
+
+    # The snooze is written first, so the daemon does not mask the remotes again.
+    start="$(date +%s)"
+    until=$((start + secs))
+    git_write "$repo" "set $SNOOZE_KEY" config --local "$SNOOZE_KEY" "$until" ||
+        die "could not snooze, $(log_hint)"
+    log INFO "$repo: snooze for ${secs}s confirmed in $tool"
+    ERRORS=0
+    while IFS= read -r name; do
+        [ -n "$name" ] && revert_remote "$repo" "$name"
+    done <<EOF
+$names
+EOF
+    if [ "$ERRORS" -gt 0 ]; then
+        snooze_end "$repo" "snooze failed" 2>/dev/null
+        die "could not restore the original remotes, $(log_hint)"
+    fi
+    report ok "Snooze" "pushing allowed from $(tilde "$repo") for ${secs}s"
+    report_more "read-only mode will be re-applied after the first push"
+
+    # The watcher reports on stderr only; with stdout closed, a pipe such as
+    # "git watchdog snooze | cat" does not wait for it.
+    snooze_watch "$repo" "$until" "$(tracking_refs "$repo")" "$secs" </dev/null >/dev/null &
+}
+
+# ---------------------------------------------------------- test environment
+# "git watchdog create-test-environment" (hidden from the help, for developers)
+# sets up a sandbox to try changes by hand, with the script or the snap:
+# throwaway repositories whose remotes are local bare repositories (so pushes
+# and fetches never reach the network), a config of its own, and a fake
+# monitored process.
+# It lives under $HOME because a snap cannot see the host's /tmp.
+
+TEST_ENV_DIR="$REAL_HOME/git-watchdog-test-environment"
+TEST_ENV_TOKEN="not-a-real-token"
+
+# test_env_repo NAME URL [FETCH_URL] - a repository whose remote URL (and the
+# read-only fetch URL, when given) lead to a local bare repository.
+test_env_repo() {
+    local url="$2" ro_url="${3:-}" repo="$TEST_ENV_DIR/test-repos/$1" bare="$TEST_ENV_DIR/remotes/$1.git"
+    git init -q --bare "$bare" &&
+        git init -q "$repo" &&
+        git -C "$repo" remote add origin "$url" &&
+        git -C "$repo" config --add "url.$bare.insteadOf" "$url" &&
+        { [ -z "$ro_url" ] || git -C "$repo" config --add "url.$bare.insteadOf" "$ro_url"; } &&
+        git -C "$repo" -c user.name=git-watchdog -c user.email=git-watchdog@localhost \
+            commit -q --allow-empty -m "initial commit" &&
+        git -C "$repo" push -q origin HEAD:refs/heads/main 2>/dev/null &&
+        git -C "$repo" fetch -q origin 2>/dev/null
+}
+
+cmd_create_test_environment() {
+    local dir="$TEST_ENV_DIR" agent program
+    [ -e "$dir" ] && die "$(tilde "$dir") already exists; stop its daemon and remove it first (see its README)"
+    ui_header create-test-environment
+    if [ -n "$DRY_RUN" ]; then
+        report dry "Test env" "would create $(tilde "$dir")"
+        return 0
+    fi
+    mkdir -p "$dir/test-repos" "$dir/remotes" "$dir/run" || die "cannot create $dir"
+
+    if ! { test_env_repo app git@gitlab.com:demo/app.git "https://oauth2:$TEST_ENV_TOKEN@gitlab.com/demo/app.git" &&
+        test_env_repo tool https://git.example.com/demo/tool.git &&
+        test_env_repo excluded git@gitlab.com:demo/excluded.git; }; then
+        die "could not create the test repositories in $dir"
+    fi
+    report ok "Repos" "$(tilde "$dir")/test-repos/{app,tool,excluded}" "(remotes are local bare repositories)"
+
+    (umask 077 && cat >"$dir/config.yaml") <<EOF
+# git-watchdog test environment, see README
+source-directories:
+  - $dir/test-repos
+
+process-name-matchers:
+  - fake-monitored-.*            # Linux shows only the first 15 characters of a process name
+
+check-interval: 1
+rescan-interval: 10
+
+remote:
+  gitlab.com:                   # app: read-only token URL, pushing blocked
+    read-only-token: $TEST_ENV_TOKEN
+    exclude:
+      - demo/excluded           # excluded: left alone
+  git.example.com:              # tool: no token, pushing blocked, fetch URL kept
+EOF
+    report ok "Config" "$(tilde "$dir")/config.yaml"
+
+    # Linux names a script's process after the file, cut to 15 characters
+    # ("fake-monitored-"), hence the pattern in the config. A script rather
+    # than a copy of sleep, which may not run outside the snap. macOS names a
+    # script's process after its interpreter, so there the script runs a copy
+    # of sleep (named "fake-monitored-p", cut to 16 characters).
+    agent="$dir/fake-monitored-process"
+    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+        # shellcheck disable=SC2016 # expanded when the script runs
+        mkdir -p "$dir/bin" && cp "$(command -v sleep)" "$dir/bin/fake-monitored-process" &&
+            printf '#!/bin/sh\n# Stands in for an AI agent: the test config watches processes named "fake-monitored-.*".\nexec "$(dirname "$0")/bin/fake-monitored-process" 31536000\n' >"$agent"
+    else
+        printf '#!/bin/sh\n# Stands in for an AI agent: the test config watches processes named "fake-monitored-.*".\nwhile :; do sleep 1; done\n' >"$agent"
+    fi && chmod 755 "$agent"
+    report ok "Fake process" "$(tilde "$agent")"
+
+    program="$SELF"
+    [ -n "${SNAP:-}" ] && program="/snap/bin/${SNAP_INSTANCE_NAME:-git-watchdog}"
+    cat >"$dir/env.sh" <<EOF
+# Source this file to point git-watchdog at the test environment:
+#   . $(tilde "$dir")/env.sh
+export GIT_WATCHDOG_CONFIG="$dir/config.yaml"
+export GIT_WATCHDOG_RUN_DIR="$dir/run"
+TEST_ENV="$dir"
+# The git-watchdog that created this environment; change it to test another one.
+git-watchdog-test() { "$program" "\$@"; }
+EOF
+    cat >"$dir/README" <<EOF
+git-watchdog test environment
+
+Use it in this shell (sets git-watchdog-test and TEST_ENV):
+  . $(tilde "$dir")/env.sh
+
+Start the fake monitored process (read-only mode on), and stop it again:
+  "\$TEST_ENV/fake-monitored-process" &
+  kill %1
+
+A repository to try things in, and the test environment's status and log:
+  cd "\$TEST_ENV/test-repos/app"
+  git-watchdog-test status -v
+  cat "\$TEST_ENV/run/git-watchdog-\$(id -u).log"
+
+Repositories (each remote is a local bare repository under remotes/):
+  app        gitlab.com, read-only token URL while active, pushing blocked
+  tool       git.example.com, no token: pushing blocked, fetch URL kept
+  excluded   excluded in the config, never changed
+
+Clean up:
+  git-watchdog-test stop; pkill -f fake-monitored-process; rm -rf "\$TEST_ENV"
+EOF
+    report ok "Shell setup" "$(tilde "$dir")/env.sh"
+    add_step "Use the test environment in this shell (git-watchdog-test runs $(tilde "$program")):" ". $(tilde "$dir")/env.sh"
+    add_step "Start the fake monitored process and see read-only mode:" "\"\$TEST_ENV/fake-monitored-process\" & git-watchdog-test status -v"
+    add_step "More commands and how to clean up:" "cat $(tilde "$dir")/README"
+    print_steps
+}
+
 completion_script() {
     cat <<'EOF'
 # bash completion for git-watchdog                              -*- shell-script -*-
@@ -1191,7 +1584,8 @@ __git_watchdog_words() {
         status) echo "--verbose --dry-run" ;;
         uninstall) echo "--remove-config --dry-run" ;;
         logs) echo "-f" ;;
-        *) echo "status start stop restart daemon sync revert init uninstall check logs completion help version --dry-run --verbose --help --version" ;;
+        snooze) echo "60 300 600" ;;
+        *) echo "status start stop restart daemon sync revert snooze init uninstall check logs completion create-test-environment help version --dry-run --verbose --help --version" ;;
     esac
 }
 
@@ -1585,30 +1979,34 @@ git-watchdog $VERSION - read-only Git remotes while selected processes run
 Usage: git watchdog [--dry-run] [command] [args]
 
 Commands:
-  status [-v]     Start the daemon if needed and show whether read-only mode is
-                  active and which processes caused it (default command).
-                  -v also lists the remotes currently in read-only mode.
-  init [host]     Create the config, install bash completion and the git command.
-                  With a host (e.g. gitlab.com), ask for its read-only token and
-                  save it (or read it from \$GIT_WATCHDOG_TOKEN / stdin).
+  status [-v]      Start the daemon if needed and show whether read-only mode is
+                   active and which processes caused it (default command).
+                   -v also lists the remotes currently in read-only mode.
+  init [host]      Create the config, install bash completion and the git command.
+                   With a host (e.g. gitlab.com), ask for its read-only token and
+                   save it (or read it from \$GIT_WATCHDOG_TOKEN / stdin).
   start | stop | restart
-                  Control the background daemon.
-  daemon          Run the daemon in the foreground (for service managers).
-  sync            Apply the wanted state once and exit.
-  revert          Restore the original remotes of all repositories now.
-  check           Show which required tools are installed (every other
-                  command checks this itself and stops if one is missing).
+                   Control the background daemon.
+  daemon           Run the daemon in the foreground (for service managers).
+  sync             Apply the wanted state once and exit.
+  revert           Restore the original remotes of all repositories now.
+  snooze [seconds]
+                   Allow pushing from the current repository for a while
+                   (default 60 seconds), after you confirm it in a desktop
+                   dialog. Read-only mode is re-applied after the first push.
+  check            Show which required tools are installed (every other
+                   command checks this itself and stops if one is missing).
   uninstall [--remove-config]
-                  Stop the daemon, restore all remotes and remove what init
-                  installed. The config is kept unless --remove-config is given.
-  logs [-f]       Show (or follow) the log file.
-  completion      Print the bash completion script.
+                   Stop the daemon, restore all remotes and remove what init
+                   installed. The config is kept unless --remove-config is given.
+  logs [-f]        Show (or follow) the log file.
+  completion       Print the bash completion script.
   help | version
 
 Options:
-  --dry-run       Only report what would change; nothing is modified.
-                  Without a command, runs "sync" in dry-run mode.
-  -v, --verbose   More detail (status).
+  --dry-run        Only report what would change; nothing is modified.
+                   Without a command, runs "sync" in dry-run mode.
+  -v, --verbose    More detail (status).
 
 Files:
   config  $CONFIG_FILE
@@ -1657,11 +2055,13 @@ main() {
         daemon | run) cmd_daemon ;;
         sync) cmd_sync ;;
         revert) cmd_revert ;;
+        snooze) cmd_snooze "$args" ;;
         init) cmd_init "$args" ;;
         uninstall) cmd_uninstall "$args" ;;
         logs | log) cmd_logs "$args" ;;
         __hosts) cmd_hosts ;;
         __default-config) default_config ;;
+        create-test-environment) cmd_create_test_environment ;;
         *) printf 'git-watchdog: unknown command %s\n\n' "$cmd" >&2; usage >&2; return 2 ;;
     esac
 }

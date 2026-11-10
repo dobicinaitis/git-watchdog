@@ -11,6 +11,67 @@ tests/run-tests.sh
 The tests create throwaway repositories and a fake agent process in a temporary directory, using their own `HOME` and
 log/lock directories.
 
+## Manual testing
+
+To try a change by hand, create a test environment:
+
+```bash
+./git-watchdog.sh create-test-environment # or: git watchdog create-test-environment
+. ~/git-watchdog-test-environment/env.sh
+```
+
+This creates a `~/git-watchdog-test-environment` directory with:
+
+- Three repositories in `test-repos/`: 
+  - `app` - fake gitlab.com remote with a read-only token
+  - `tool` a host without a token
+  - `excluded` - an excluded repository in the config
+- A local bare repository as each one's remote, so pushes and fetches never reach the network.
+- Its own config, log and daemon, which run next to your regular ones.
+- A `fake-monitored-process` script that turns read-only mode on while it runs.
+
+The `env.sh` file points `GIT_WATCHDOG_CONFIG` and `GIT_WATCHDOG_RUN_DIR` at the test environment and defines a
+`git-watchdog-test` command as the git-watchdog that created it.
+
+> [!NOTE]
+> If your regular config watches `$HOME`, your regular daemon also finds the test repositories and switches them to
+> read-only mode while a real monitored processes runs. Stop it using `git watchdog stop` while you test.
+
+```bash
+"$TEST_ENV/fake-monitored-process" &   # read-only mode on
+cd "$TEST_ENV/test-repos/app"
+git-watchdog-test status -v
+git push origin HEAD:main              # blocked
+kill %1                                # read-only mode off
+```
+
+### Script or snap
+
+`env.sh` runs the git-watchdog that created the environment: the script from your checkout or the snap.
+To switch, create the environment again with the other one, or redefine `git-watchdog-test`.
+
+> [!WARNING]
+> With the snap installed, `git watchdog` and `git-watchdog` run the snap. Run the script using `git-watchdog-test`, 
+> and don't run its `init`: that writes `~/.config/git-watchdog` and replaces the snap's completion link.
+
+To test a snap you built, install it over the Store version (your config is kept), then go back afterwards:
+
+```bash
+sudo snap install --dangerous git-watchdog_0.2.1_amd64.snap
+sudo snap connect git-watchdog:system-observe
+git watchdog create-test-environment # git-watchdog-test now runs the snap
+# ... test ...
+sudo snap revert git-watchdog # back to the Store revision
+```
+
+Your regular daemon moves to the new revision on its own; `git watchdog logs` shows it.
+
+### Clean up
+
+```bash
+git-watchdog-test stop; pkill -f fake-monitored-process; rm -rf ~/git-watchdog-test-environment
+```
+
 ## CI
 
 [CI](../.github/workflows/ci.yml) runs ShellCheck and the test suite on Ubuntu and macOS using the stock Bash 3.2.

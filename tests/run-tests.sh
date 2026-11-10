@@ -100,9 +100,9 @@ run_suite() {
 
     # --- tool check and init
     check "check reports all tools present" eval "gwd check >/dev/null"
-    check "check lists each tool" eval "gwd check | grep -q '^  . git  *[^ ]'"
+    check "check lists each tool" eval "grep -q '^  . git  *[^ ]' <<<\"\$(gwd check)\""
     check "status without config fails" eval "! gwd status >/dev/null"
-    check "status without config suggests init" eval "gwd status | grep -q 'git watchdog init'"
+    check "status without config suggests init" eval "grep -q 'git watchdog init' <<<\"\$(gwd status)\""
     printf '# user bashrc\n' >"$HOME/.bashrc"
     local bashrc_before
     bashrc_before="$(cat "$HOME/.bashrc")"
@@ -134,7 +134,7 @@ run_suite() {
     check "snap init starts the daemon" sh -c "kill -0 '$snap_pid' 2>/dev/null"
     check "snap init reports the running daemon" grep -q "Daemon .*running (pid $snap_pid)" <<<"$snap_init_out"
     gwd stop >/dev/null
-    check "snap init --dry-run does not start the daemon" eval "SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON='$HOME/snap/git-watchdog/common' SNAP_USER_DATA='$HOME/snap/git-watchdog/x1' gwd init --dry-run | grep -q 'would start the daemon' && ! test -d '$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock'"
+    check "snap init --dry-run does not start the daemon" eval "SNAP=/snap/git-watchdog/x1 SNAP_USER_COMMON='$HOME/snap/git-watchdog/common' SNAP_USER_DATA='$HOME/snap/git-watchdog/x1' gwd init --dry-run > '$T/init.out'; grep -q 'would start the daemon' '$T/init.out' && ! test -d '$GIT_WATCHDOG_RUN_DIR/git-watchdog-$(id -u).lock'"
     local link_cmd
     link_cmd="$(grep '^ *mkdir -p .* && ln -sf ' <<<"$snap_init_out")"
     check "snap init prints the completion link command" test -n "$link_cmd"
@@ -186,12 +186,106 @@ EOF
     masked_snapshot="$(snapshot)"
     gwd sync >/dev/null
     eq "second sync is idempotent" "$masked_snapshot" "$(snapshot)"
-    check "sync summary reports nothing to change" eval "gwd sync | grep -q 'Remotes .*nothing to change'"
+    check "sync summary reports nothing to change" eval "grep -q 'Remotes .*nothing to change' <<<\"\$(gwd sync)\""
     out="$(gwd status -v --dry-run)"
     check "status shows ACTIVE" grep -q 'Read-only .*ACTIVE' <<<"$out"
     check "status names process and pid" grep -q "triggered by $FAKE_PROC (pid $FAKE_PID)" <<<"$out"
     check "status -v lists masked remotes" grep -q "src/app (origin)" <<<"$out"
     check "git push is refused" sh -c "! git -C '$HOME/src/app' push origin HEAD 2>/dev/null"
+
+    # --- git watchdog snooze: confirmed in a (fake) desktop dialog
+    local pr="$HOME/src/pushme" bare="$T/bare.git" zargs="$T/zenity.args" sout="$T/snooze.out"
+    git init -q --bare "$bare"
+    mkrepo "$pr" origin git@gitlab.com:group/push.git
+    # The restored SSH URL reaches the local bare repository instead of gitlab.com.
+    git -C "$pr" config "url.$bare.insteadOf" git@gitlab.com:group/push.git
+    git -C "$pr" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one
+    gwd sync >/dev/null
+    check "snooze test repository is read-only" grep -q '^git-watchdog-read-only://' <<<"$(pushurl "$pr" origin)"
+    cat >"$T/bin/zenity" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$zargs"
+exit "\${FAKE_ZENITY_RC:-1}"
+EOF
+    chmod +x "$T/bin/zenity"
+    snooze() { (cd "$pr" && DISPLAY=:0 "$SCRIPT" "$@" >"$sout" 2>&1); }
+    readonly_pr() { grep -q '^git-watchdog-read-only://' <<<"$(pushurl "$pr" origin)"; }
+    wait_readonly() { for _ in 1 2 3 4 5 6 7 8; do readonly_pr && return 0; sleep 0.5; done; return 1; }
+    if [ "$(uname -s)" != Darwin ]; then # macOS would fall back to osascript
+        check "snooze without a display is refused" eval "! (cd '$pr' && env -u DISPLAY -u WAYLAND_DISPLAY '$SCRIPT' snooze >/dev/null 2>&1)"
+        check "refused snooze keeps read-only mode" readonly_pr
+    fi
+    check "snooze rejects a bad duration" eval "! FAKE_ZENITY_RC=0 snooze snooze 5x"
+    check "snooze rejects a too long duration" eval "! FAKE_ZENITY_RC=0 snooze snooze 99999"
+    check "cancelled snooze fails" eval "! FAKE_ZENITY_RC=1 snooze snooze"
+    check "cancelled snooze reports it" grep -q 'Snooze .*cancelled' "$sout"
+    check "cancelled snooze keeps read-only mode" readonly_pr
+    check "a timed-out zenity dialog cancels" eval "! FAKE_ZENITY_RC=5 snooze snooze && grep -q 'Snooze .*cancelled' '$sout'"
+    printf '#!/bin/sh\necho "cannot open display: :0" >&2\nexit 255\n' >"$T/bin/zenity.broken"
+    chmod +x "$T/bin/zenity.broken"
+    mv "$T/bin/zenity" "$T/bin/zenity.ok" && mv "$T/bin/zenity.broken" "$T/bin/zenity"
+    check "a dialog that cannot be shown fails the snooze" eval "! snooze snooze"
+    check "a dialog that cannot be shown is reported as such" grep -q 'Snooze .*dialog could not be shown' "$sout"
+    check "the dialog error is shown" grep -q 'cannot open display: :0' "$sout"
+    check "the dialog error is logged" grep -q 'snooze dialog could not be shown: zenity exited with status 255' "$LOG"
+    mv "$T/bin/zenity.ok" "$T/bin/zenity"
+    FAKE_ZENITY_RC=1 snooze snooze # for the argument checks below
+    check "snooze asks with Cancel as the default" grep -qx -- '--default-cancel' "$zargs"
+    check "snooze dialog times out" grep -qx -- '--timeout=30' "$zargs"
+    check "snooze dialog names the duration" grep -q 'for 60 seconds' "$zargs"
+    # In the snap, zenity runs through the gnome extension's command chain.
+    mkdir -p "$T/fakesnap/snap/command-chain"
+    cat >"$T/fakesnap/snap/command-chain/gpu-2604-wrapper" <<EOF
+#!/bin/sh
+echo gpu-wrapper >>"$T/chain.used"
+exec "\$@"
+EOF
+    cat >"$T/fakesnap/snap/command-chain/desktop-launch" <<EOF
+#!/bin/sh
+echo "desktop-launch \$GDK_PIXBUF_MODULE_FILE" >>"$T/chain.used"
+exec "\$@"
+EOF
+    chmod +x "$T/fakesnap/snap/command-chain/"*
+    (cd "$pr" && SNAP="$T/fakesnap" GIT_WATCHDOG_CONFIG="$CFG" DISPLAY=:0 FAKE_ZENITY_RC=1 "$SCRIPT" snooze >/dev/null 2>&1)
+    eq "the snap runs zenity through the GPU wrapper, then the desktop launcher" "gpu-wrapper desktop-launch" "$(awk '{print $1}' "$T/chain.used" | tr '\n' ' ' | sed 's/ $//')"
+    check "the dialog still ran through the chain" grep -qx -- '--default-cancel' "$zargs"
+    check "the launcher gets the snap's own pixbuf loader cache" grep -q "/snap/git-watchdog/common/.cache/gdk-pixbuf-loaders.cache" "$T/chain.used"
+    rm -f "$zargs"
+    check "dry-run snooze does not ask" eval "FAKE_ZENITY_RC=0 snooze --dry-run snooze && grep -q 'would ask' '$sout' && ! test -e '$zargs'"
+    check "dry-run snooze keeps read-only mode" readonly_pr
+
+    check "confirmed snooze succeeds" eval "FAKE_ZENITY_RC=0 snooze snooze 30"
+    check "snooze restores the original remote" eval "! readonly_pr && test \"\$(url '$pr' origin)\" = git@gitlab.com:group/push.git"
+    gwd sync >/dev/null
+    check "sync leaves a snoozed repository alone" eval "! readonly_pr"
+    check "plain git push works while snoozed" git -C "$pr" push -q origin HEAD:refs/heads/main
+    check "the push re-applies read-only mode" wait_readonly
+    sleep 0.5
+    check "the push is reported in the terminal" grep -q 'push to origin/main detected, read-only mode re-applied' "$sout"
+    check "the snooze is dropped after the push" eval "! git -C '$pr' config git-watchdog.snooze-until >/dev/null"
+    eq "the token URL is back after the push" "https://oauth2:$TOKEN@gitlab.com/group/push.git" "$(url "$pr" origin)"
+
+    check "short snooze succeeds" eval "FAKE_ZENITY_RC=0 snooze snooze 1"
+    git -C "$pr" fetch -q origin # a fetch does not end the snooze early
+    check "the snooze ends on its own" wait_readonly
+    sleep 0.5
+    check "the end of the snooze is reported" grep -q 'snooze of 1s ended without a push' "$sout"
+    check "only the snoozed repository was restored" eval "! grep 'restore remote' '$LOG' | grep -qv pushme"
+    rm -f "$T/bin/zenity"
+    # xmessage is the fallback (and the only dialog in the snap); a timeout exits with 0.
+    if ! command -v zenity >/dev/null && ! command -v kdialog >/dev/null; then
+        cat >"$T/bin/xmessage" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$zargs"
+exit "\${FAKE_XMESSAGE_RC:-0}"
+EOF
+        chmod +x "$T/bin/xmessage"
+        check "xmessage timeout cancels the snooze" eval "! FAKE_XMESSAGE_RC=0 snooze snooze"
+        check "xmessage has Cancel as the default" grep -qx -- 'Cancel' "$zargs"
+        check "xmessage Allow button snoozes" eval "FAKE_XMESSAGE_RC=101 snooze snooze 1 && ! readonly_pr"
+        check "the xmessage snooze ends on its own" wait_readonly
+        rm -f "$T/bin/xmessage"
+    fi
 
     # --- a host without a token keeps the original fetch URL, push stays blocked
     GIT_WATCHDOG_TOKEN="" gwd init gitlab.com >/dev/null
@@ -290,6 +384,37 @@ EOF
     check "log never contains the token" sh -c "! grep -q '$TOKEN' '$LOG'"
     check "log contains activity" grep -q 'read-only mode ACTIVE' "$LOG"
 
+    # --- create-test-environment (hidden developer command)
+    local te="$HOME/git-watchdog-test-environment" te_pid
+    check "create-test-environment is not in the help" eval "! grep -q create-test-environment <<<\"\$(gwd help)\""
+    check "create-test-environment is completed" eval "grep -q create-test-environment <<<\"\$(gwd completion)\""
+    out="$(gwd create-test-environment)"
+    check "create-test-environment prints how to use it" grep -q '\. ~/git-watchdog-test-environment/env.sh' <<<"$out"
+    check "create-test-environment refuses to overwrite" eval "! gwd create-test-environment >/dev/null 2>&1"
+    eq "test environment config is owner-only" "600" "$(stat -c %a "$te/config.yaml" 2>/dev/null || stat -f %Lp "$te/config.yaml")"
+    (
+        # shellcheck disable=SC1091
+        . "$te/env.sh"
+        "$TEST_ENV/fake-monitored-process" &
+        te_pid=$!
+        sleep 0.5
+        git-watchdog-test sync >/dev/null
+        check "test environment: app gets the token URL" test "$(url "$te/test-repos/app" origin)" = "https://oauth2:not-a-real-token@gitlab.com/demo/app.git"
+        check "test environment: app cannot push" eval "! git -C '$te/test-repos/app' push -q origin HEAD:refs/heads/main 2>/dev/null"
+        check "test environment: app can fetch from its local remote" git -C "$te/test-repos/app" fetch -q origin
+        check "test environment: tool keeps its fetch URL" test "$(url "$te/test-repos/tool" origin)" = "https://git.example.com/demo/tool.git"
+        check "test environment: excluded is left alone" eval "! git -C '$te/test-repos/excluded' config remote.origin.pushurl >/dev/null"
+        kill "$te_pid"
+        wait "$te_pid" 2>/dev/null
+        git-watchdog-test sync >/dev/null
+        check "test environment: app is restored" test "$(url "$te/test-repos/app" origin)" = "git@gitlab.com:demo/app.git"
+        check "test environment: app can push again" git -C "$te/test-repos/app" push -q origin HEAD:refs/heads/main
+        printf '%s %s\n' "$PASS" "$FAIL" >"$T/te.counts"
+    )
+    read -r PASS FAIL <"$T/te.counts"
+    check "test environment does not touch the other repositories" test -z "$(git -C "$HOME/src/app" config --get-regexp '^git-watchdog\.')"
+    rm -rf "$te"
+
     # --- uninstall (keeps the config by default)
     gwd start >/dev/null
     start_fake
@@ -297,7 +422,7 @@ EOF
     out="$(gwd --dry-run uninstall)"
     check "uninstall --dry-run reports what it would remove" grep -q 'Completion .*would remove ~/.local/share/bash-completion' <<<"$out"
     check "uninstall --dry-run reports the remotes" grep -q 'Remotes .*would apply' <<<"$out"
-    check "uninstall --dry-run keeps the daemon" eval "gwd status --dry-run | grep -q 'Daemon .*running'"
+    check "uninstall --dry-run keeps the daemon" eval "grep -q 'Daemon .*running' <<<\"\$(gwd status --dry-run)\""
     check "uninstall --dry-run keeps read-only mode" grep -q '^git-watchdog-read-only://' <<<"$(pushurl "$HOME/src/app" origin)"
     gwd uninstall >/dev/null
     stop_fake

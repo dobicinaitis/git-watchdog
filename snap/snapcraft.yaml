@@ -40,9 +40,21 @@ apps:
     completer: completions/git-watchdog # bash completion, installed by snapd
     environment:
       GIT_EXEC_PATH: $SNAP/usr/lib/git-core
+      GIT_TEMPLATE_DIR: $SNAP/usr/share/git-core/templates
     plugs:
       - home           # Git repositories under $HOME
       - system-observe # see other processes (pgrep/ps)
+      # plugs for the zenity dialog of "git watchdog snooze":
+      - desktop
+      - wayland
+      - x11
+
+  # Only here to bring in the gnome extension (GTK runtime for zenity) without
+  # wrapping every CLI call in its launcher: the CLI runs the launcher itself,
+  # just for the dialog.
+  dialog:
+    command: usr/bin/zenity
+    extensions: [gnome]
 
   # Started at desktop login through the autostart file that "git watchdog init"
   # writes to $SNAP_USER_DATA/.config/autostart (user daemons are still experimental in snapd).
@@ -51,6 +63,7 @@ apps:
     autostart: git-watchdog-daemon.desktop
     environment:
       GIT_EXEC_PATH: $SNAP/usr/lib/git-core
+      GIT_TEMPLATE_DIR: $SNAP/usr/share/git-core/templates
     plugs:
       - home
       - system-observe
@@ -69,3 +82,4 @@ parts:
     stage-packages:
       - git
       - procps
+      - zenity # confirmation dialog for "git watchdog snooze"
