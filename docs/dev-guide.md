@@ -57,7 +57,7 @@ To switch, create the environment again with the other one, or redefine `git-wat
 To test a snap you built, install it over the Store version (your config is kept), then go back afterwards:
 
 ```bash
-sudo snap install --dangerous git-watchdog_0.2.1_amd64.snap
+sudo snap install --dangerous git-watchdog_0.3.0_amd64.snap
 sudo snap connect git-watchdog:system-observe
 git watchdog create-test-environment # git-watchdog-test now runs the snap
 # ... test ...
@@ -112,7 +112,7 @@ Required setup:
 
 ```bash
 snapcraft pack
-sudo snap install --dangerous git-watchdog_0.2.1_amd64.snap
+sudo snap install --dangerous git-watchdog_0.3.0_amd64.snap
 sudo snap connect git-watchdog:system-observe
 git watchdog init gitlab.com
 ```
